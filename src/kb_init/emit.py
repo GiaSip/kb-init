@@ -57,7 +57,7 @@ def _freeze_paths(docs: list[Document]) -> dict[str, str]:
     """
     used_keys: set[str] = set()
     mapping: dict[str, str] = {}
-    counts: dict[str, int] = {}
+    owners: dict[str, set[str]] = {}    # alias → 拥有它的 doc_id 集合
 
     for doc in docs:
         if doc.status != "kept":
@@ -77,14 +77,17 @@ def _freeze_paths(docs: list[Document]) -> dict[str, str]:
         for alias in (doc.title, source.stem, source.name, doc.source_relpath):
             key = _norm_key(alias.strip()) if alias else ""
             if key:
-                counts[key] = counts.get(key, 0) + 1
+                # 按 doc_id 去重：同一篇文档的 title 与 stem 可能相同，
+                # 若按「出现次数」计会自我构成假歧义，把本来唯一的别名删掉，
+                # 导致大量本应成功的链接退化成纯文本。
+                owners.setdefault(key, set()).add(doc.doc_id)
                 mapping.setdefault(key, name)
 
     # 歧义别名一律作废——先到先得会产生「活着的错链」：链接指向了错误的
     # 那一篇，而且不会记入 unresolved，manifest 反而显示解析成功。
     # 死链尚可被发现，错链不会。
-    for key, n in counts.items():
-        if n > 1:
+    for key, doc_ids in owners.items():
+        if len(doc_ids) > 1:
             mapping.pop(key, None)
     return mapping
 

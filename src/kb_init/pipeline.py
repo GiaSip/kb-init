@@ -8,6 +8,7 @@ zip 临时目录通过 contextlib.ExitStack + tempfile.TemporaryDirectory 管理
 from __future__ import annotations
 
 import contextlib
+import shutil
 import tempfile
 import uuid
 from pathlib import Path
@@ -59,6 +60,12 @@ def run(
         # 用户会卡在一个既不完整也无法重来的状态。
         # 拒绝任何既有内容——不只是 knowledge/。既有 manifest.json 在 POSIX
         # 上会被静默覆盖，既有同名目录还会让发布失败。
+        # lexists 而非 exists：断链 symlink 在 exists() 下返回 False，
+        # 会让后续 rename 覆盖掉这个既有目录项。
+        if out_dir.is_symlink() or (out_dir.exists() and not out_dir.is_dir()):
+            raise FileExistsError(
+                f"输出路径已存在且不是空目录：{out_dir}。请换一个 --out 目录。"
+            )
         if out_dir.exists() and any(out_dir.iterdir()):
             raise FileExistsError(
                 f"输出目录已存在内容，拒绝覆盖：{out_dir}。请换一个 --out 目录。"
@@ -68,10 +75,13 @@ def run(
         # 那就不叫整次运行原子了。
         parent = out_dir.parent
         parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(
-            stack.enter_context(
-                tempfile.TemporaryDirectory(prefix=".kb-init-staging-", dir=parent)
-            )
+        # 手动管理而非 TemporaryDirectory：发布是把 staging 本身 rename 走，
+        # 之后任何「重建目录好让自动清理无害」的补救都发生在 commit 点之后——
+        # 那一步若失败就会出现「命令报错但产物已发布」，破坏失败原子性。
+        staging = Path(tempfile.mkdtemp(prefix=".kb-init-staging-", dir=parent))
+        published = False
+        stack.callback(
+            lambda: None if published else shutil.rmtree(staging, ignore_errors=True)
         )
 
         result = emit(docs, staging, wikilinks=wikilinks)
@@ -88,9 +98,7 @@ def run(
         # 使 rename 目标不存在——同一文件系统内 rename 是原子的。
         if out_dir.exists():
             out_dir.rmdir()             # 上面已确保它是空的
-        staging.rename(out_dir)
-        # 已发布，ExitStack 清理时 staging 路径已不存在，用 ignore_cleanup_errors
-        # 语义不可靠，故显式重建一个空目录让 TemporaryDirectory 的清理无害。
-        staging.mkdir(exist_ok=True)
+        staging.rename(out_dir)         # ← commit 点，此后不做任何可能失败的事
+        published = True
 
         return summarize(docs)

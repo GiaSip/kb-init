@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -264,10 +265,18 @@ def test_ambiguous_alias_does_not_produce_live_wrong_link(tmp_path):
     # 两篇同 stem 不同目录的文档都必须保留（不得被误判成文件系统碰撞）
     assert len(list(knowledge.glob("*.md"))) == 3, "不同目录的同名文档被误删了"
 
-    for f in knowledge.glob("*.md"):
-        for target in _extract_md_targets(f.read_text(encoding="utf-8")):
-            if target.endswith(".md"):
-                assert (knowledge / target).exists()
+    linker = next(f for f in knowledge.glob("*.md") if "引用者" in f.stem)
+    body = linker.read_text(encoding="utf-8")
+
+    # 只断言"没有死链"是不够的——指向甲或乙都会通过。必须断言它
+    # 既没有变成链接、也确实进了 unresolved 账。
+    assert "](甲.md)" not in body, "歧义别名指向了甲——这是活着的错链"
+    assert "](乙.md)" not in body, "歧义别名指向了乙——这是活着的错链"
+    assert "note" in body, "降级后的纯文本应保留原标签"
+
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    targets = [u["target"] for u in manifest["unresolved_links"]]
+    assert "note" in targets, f"歧义链接未记入 unresolved_links：{targets}"
 
 
 def test_wikilinks_flag_still_remaps_standard_links(tmp_path):
@@ -286,7 +295,13 @@ def test_wikilinks_flag_still_remaps_standard_links(tmp_path):
     run(src, out, wikilinks=True, run_id="wl")
 
     knowledge = out / "knowledge"
-    for f in knowledge.glob("*.md"):
-        for target in _extract_md_targets(f.read_text(encoding="utf-8")):
-            if target.endswith(".md"):
-                assert (knowledge / target).exists(), f"{f.name} → {target}"
+    linker = next(f for f in knowledge.glob("*.md") if "引用者" in f.stem)
+    body = linker.read_text(encoding="utf-8")
+
+    # 只遍历"剩余链接"是不够的——若链接被降级成纯文本，循环为空也会通过。
+    # 必须断言链接确实存在、且指向了改写后的真实文件。
+    targets = [t for t in _extract_md_targets(body) if t.endswith(".md")]
+    assert targets, "标准链接被降级成纯文本了，--wikilinks 不该跳过重映射"
+    assert "target%20page.md" not in body, "原始 URL 编码路径没有被重映射"
+    for target in targets:
+        assert (knowledge / target).exists(), f"{linker.name} → {target}"
