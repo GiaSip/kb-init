@@ -41,6 +41,8 @@ def test_manifest_roundtrip(tmp_path):
     assert data["counts"]["total"] == 2
     assert data["counts"]["kept"] == 1
     assert len(data["documents"]) == 2
+    assert data["corpus_hash"] == compute_corpus_hash(docs)
+    assert data["tool_version"]  # 存在且非空
 
 
 def test_dropped_documents_are_recorded_with_reason(tmp_path):
