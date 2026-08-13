@@ -1,10 +1,12 @@
 # STATUS — kb-init
 
-> 最后更新：2026-08-13
+> 最后更新：2026-08-13（阻断项修复轮）
 
 ## 当前阶段
 
-**设计定稿，未开工。** 这是"系统开源第一块"计划的落地项目——目标是扩大在 Agent 领域的影响力。
+**Plan 1 已实现并通过 Codex 终审后的阻断项修复轮，待二次终审。**
+
+原始阶段记录： 这是"系统开源第一块"计划的落地项目——目标是扩大在 Agent 领域的影响力。
 
 ## 最近进展
 
@@ -38,3 +40,25 @@
 | 处理后配对样本（验证编译效果） | `~/Documents/Obsidian Vault/Personal/*/Apple Notes/` |
 | 优等生对照组 | `~/Documents/Obsidian Vault/Wiki/` |
 | 当年的转换脚本（参考） | `~/Documents/assistant-output/notion_to_obsidian.py` |
+
+
+## 阻断项修复轮（2026-08-13）
+
+Codex 5.6-Sol 全分支终审判定「暂不合并」，6 条阻断项 + 5 条必修 minor 已全部处理：
+
+| 项 | 状态 |
+|---|---|
+| B1 路径冻结逐篇而非全局 | ✅ emit 重构为两遍式 + 引用映射 + unresolved 记账 |
+| B2 文件系统等价名碰撞 | ✅ 入口 NFC+casefold 检测记账 / 出口等价键唯一化 |
+| B3 目录输入无总量限制 | ✅ 累计 .md 字节执行 max_total_bytes |
+| B4 单文件原子≠整次运行原子 | ✅ staging 目录整体发布 |
+| B5 文件名注入 frontmatter | ✅ 改用 yaml.safe_dump |
+| B6 CLI 无错误边界 | ✅ 退出码合同 0/1/2/3/4，不吐 traceback |
+| 5 条必修 minor | ✅ null byte / 超大文件静默跳过 / frontmatter 炸弹 / 年份回归 / .md.tmp 残骸 |
+
+**最关键的发现**：B1 修完后合成测试全绿，但真实语料 288 条内部链接 **100% 死链**——
+Notion 导出用的是 URL 编码的标准相对链接而非 wikilink，只处理 wikilink 会漏掉全部真实链接。
+补 `_rewrite_md_links` 后降到 2/227（0.9%，均为嵌套结构链接）。
+**合成语料测不出真实形态，这是这一轮最贵的教训。**
+
+测试 67 → 78 passed。
