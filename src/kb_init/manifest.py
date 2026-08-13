@@ -24,7 +24,11 @@ def compute_corpus_hash(docs: list[Document]) -> str:
 
 
 def write_manifest(
-    docs: list[Document], out_dir: Path, run_id: str, source: str
+    docs: list[Document],
+    out_dir: Path,
+    run_id: str,
+    source: str,
+    unresolved_links: list[dict] | None = None,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -35,6 +39,7 @@ def write_manifest(
         "source": source,
         "corpus_hash": compute_corpus_hash(docs),
         "counts": summarize(docs),
+        "unresolved_links": unresolved_links or [],
         "documents": [
             {
                 "doc_id": d.doc_id,

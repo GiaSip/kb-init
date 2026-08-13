@@ -20,7 +20,7 @@ def _doc(doc_id: str, title: str, status: str = "kept") -> Document:
 
 
 def test_only_kept_docs_are_written(tmp_path):
-    docs = emit([_doc("a", "保留"), _doc("b", "丢弃", status="dropped")], tmp_path)
+    docs = emit([_doc("a", "保留"), _doc("b", "丢弃", status="dropped")], tmp_path).documents
     written = list((tmp_path / "knowledge").glob("*.md"))
     assert len(written) == 1
     assert docs[0].out_relpath is not None
@@ -28,7 +28,7 @@ def test_only_kept_docs_are_written(tmp_path):
 
 
 def test_out_relpath_is_frozen_and_file_exists(tmp_path):
-    docs = emit([_doc("a", "标题")], tmp_path)
+    docs = emit([_doc("a", "标题")], tmp_path).documents
     target = tmp_path / docs[0].out_relpath
     assert target.exists()
     assert docs[0].out_relpath.startswith("knowledge/")
@@ -36,12 +36,12 @@ def test_out_relpath_is_frozen_and_file_exists(tmp_path):
 
 def test_paths_are_flattened_not_nested(tmp_path):
     """Notion 导出深达 11-15 层，必须拍平。"""
-    docs = emit([_doc("a", "标题")], tmp_path)
+    docs = emit([_doc("a", "标题")], tmp_path).documents
     assert docs[0].out_relpath.count("/") == 1
 
 
 def test_title_collision_gets_unique_path(tmp_path):
-    docs = emit([_doc("a", "同名"), _doc("b", "同名")], tmp_path)
+    docs = emit([_doc("a", "同名"), _doc("b", "同名")], tmp_path).documents
     assert docs[0].out_relpath != docs[1].out_relpath
 
 
@@ -55,7 +55,8 @@ def test_refuses_to_overwrite_existing_output(tmp_path):
 def test_default_uses_standard_markdown_links(tmp_path):
     doc = _doc("a", "标题")
     doc.body = "见 [[另一篇]] 的说明"
-    emit([doc], tmp_path)
+    target = _doc("b", "另一篇")          # 链接目标必须真实存在
+    emit([doc, target], tmp_path)
     written = (tmp_path / doc.out_relpath).read_text(encoding="utf-8")
     assert "[[另一篇]]" not in written
     assert "[另一篇](另一篇.md)" in written
@@ -70,7 +71,7 @@ def test_wikilinks_flag_preserves_dialect(tmp_path):
 
 
 def test_frontmatter_carries_doc_id(tmp_path):
-    docs = emit([_doc("a", "标题")], tmp_path)
+    docs = emit([_doc("a", "标题")], tmp_path).documents
     written = (tmp_path / docs[0].out_relpath).read_text(encoding="utf-8")
     assert docs[0].doc_id in written
 
@@ -79,7 +80,8 @@ def test_anchor_wikilink_converts_to_standard_markdown(tmp_path):
     """[[目标#小节]] → [目标#小节](目标.md#小节)"""
     doc = _doc("a", "标题")
     doc.body = "见 [[目标#小节]] 的说明"
-    emit([doc], tmp_path)
+    target = _doc("b", "目标")            # 链接目标必须真实存在
+    emit([doc, target], tmp_path)
     written = (tmp_path / doc.out_relpath).read_text(encoding="utf-8")
     assert "[[目标#小节]]" not in written
     assert "[目标#小节](目标.md#小节)" in written
@@ -89,7 +91,8 @@ def test_alias_plus_anchor_wikilink_converts_correctly(tmp_path):
     """[[目标#小节|显示文字]] → [显示文字](目标.md#小节)"""
     doc = _doc("a", "标题")
     doc.body = "见 [[目标#小节|显示文字]] 的说明"
-    emit([doc], tmp_path)
+    target = _doc("b", "目标")            # 链接目标必须真实存在
+    emit([doc, target], tmp_path)
     written = (tmp_path / doc.out_relpath).read_text(encoding="utf-8")
     assert "[[目标#小节|显示文字]]" not in written
     assert "[显示文字](目标.md#小节)" in written
@@ -100,7 +103,7 @@ def test_three_same_title_docs_get_unique_paths_and_content(tmp_path):
     doc_a = _doc("aaa", "同名")
     doc_b = _doc("bbb", "同名")
     doc_c = _doc("ccc", "同名")
-    docs = emit([doc_a, doc_b, doc_c], tmp_path)
+    docs = emit([doc_a, doc_b, doc_c], tmp_path).documents
     paths = [d.out_relpath for d in docs]
     assert len(set(paths)) == 3  # 三个路径互不相同
     for doc in docs:

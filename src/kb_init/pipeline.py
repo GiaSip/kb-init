@@ -50,6 +50,35 @@ def run(
             docs.append(doc)
 
         mark(docs)
-        emit(docs, out_dir, wikilinks=wikilinks)
-        write_manifest(docs, out_dir, run_id=run_id, source=str(source))
+
+        # 整次运行原子：全部产物先落 staging，成功后一次性发布。
+        # 逐篇原子（写 .tmp 再 replace）不够——第 N 篇失败时前 N-1 篇
+        # 已是正式文件而 manifest 尚未写入，重跑又被 knowledge/ 非空拒绝，
+        # 用户会卡在一个既不完整也无法重来的状态。
+        if (out_dir / "knowledge").exists() and any(
+            (out_dir / "knowledge").iterdir()
+        ):
+            raise FileExistsError(
+                f"输出目录已存在内容，拒绝覆盖：{out_dir / 'knowledge'}。"
+                "请换一个 --out 目录。"
+            )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            stack.enter_context(
+                tempfile.TemporaryDirectory(prefix=".kb-init-staging-", dir=out_dir)
+            )
+        )
+
+        result = emit(docs, staging, wikilinks=wikilinks)
+        write_manifest(
+            docs,
+            staging,
+            run_id=run_id,
+            source=str(source),
+            unresolved_links=result.unresolved_links,
+        )
+
+        for item in sorted(staging.iterdir()):      # 发布
+            item.rename(out_dir / item.name)
+
         return summarize(docs)
