@@ -29,7 +29,9 @@ def _convert_links(body: str) -> str:
         label = (match.group(2) or target_full).strip()
         if "#" in target_full:
             target_file, anchor = target_full.split("#", 1)
-            return f"[{label}]({target_file}.md#{anchor})"
+            if target_file:
+                return f"[{label}]({target_file}.md#{anchor})"
+            return f"[{label}](#{anchor})"  # [[#小节]] 同文件锚点
         return f"[{label}]({target_full}.md)"
 
     # 分段处理：_CODE_FENCE.split 奇数索引为代码块，偶数索引为普通文本

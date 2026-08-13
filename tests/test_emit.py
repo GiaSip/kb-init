@@ -125,3 +125,24 @@ def test_wikilinks_in_inline_code_are_not_converted(tmp_path):
     written = (tmp_path / doc.out_relpath).read_text(encoding="utf-8")
     assert "[[链接]]" not in written
     assert "[[不转换]]" in written
+
+
+def test_same_file_anchor_wikilink_converts_correctly(tmp_path):
+    """[[#小节]] → [#小节](#小节)（同文件锚点，标准 Markdown 合法）"""
+    doc = _doc("a", "标题")
+    doc.body = "见 [[#小节]] 的说明"
+    emit([doc], tmp_path)
+    written = (tmp_path / doc.out_relpath).read_text(encoding="utf-8")
+    assert "[[#小节]]" not in written
+    assert "[#小节](#小节)" in written
+    assert ".md#" not in written  # 不能产生空文件名 .md#小节
+
+
+def test_same_file_anchor_with_alias_converts_correctly(tmp_path):
+    """[[#小节|显示]] → [显示](#小节)"""
+    doc = _doc("a", "标题")
+    doc.body = "见 [[#小节|显示]] 的说明"
+    emit([doc], tmp_path)
+    written = (tmp_path / doc.out_relpath).read_text(encoding="utf-8")
+    assert "[[#小节|显示]]" not in written
+    assert "[显示](#小节)" in written
