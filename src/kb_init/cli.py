@@ -29,6 +29,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.source is None:
         parser.print_usage(sys.stderr)
         return 2
+
+    from kb_init.pipeline import run
+
+    try:
+        counts = run(args.source, args.out, wikilinks=args.wikilinks)
+    except FileExistsError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    kept = counts["kept"]
+    total = counts["total"]
+    print(f"读入 {total} 篇，保留 {kept} 篇（留存 {kept / total:.0%}）" if total else "未找到 .md 文件")
+    print(f"  空壳丢弃 {counts['dropped_stub']} 篇 / 重复丢弃 {counts['dropped_duplicate']} 篇")
+    print(f"输出目录：{args.out}")
     return 0
 
 
