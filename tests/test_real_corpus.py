@@ -28,14 +28,27 @@ def test_apple_notes_retention_near_baseline(tmp_path):
 
 @pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
 def test_no_unknown_date_explosion(tmp_path):
-    """降级链若整体失效，unknown 会爆表——这是链条坏掉的哨兵。"""
+    """Apple Notes 语料上的粗哨兵：捕获"链条完全崩溃"（100% unknown）的极端情况。
+
+    **本测试不验证降级链的正确性**，那由 test_e2e.py::test_date_resolution_chain_explicit
+    的显式断言负责。此处仅作粗哨兵，原因如下：
+
+    Apple Notes 导出对五级降级链中的三级天然无效：
+      - frontmatter 级：Apple Notes 导出无 YAML 前置块
+      - filename 级：文件名格式如 "新建备忘录.md"，无日期前缀
+      - git 级：导出目录不是 git 仓库
+    另有 body 级有效性未知，实测 unknown 率约 96%，属预期行为。
+
+    阈值 0.98 的含义：实测 96.1% 通过；若 resolve_date 被删或整体抛异常
+    导致所有文档均 unknown（100%），则被此断言捕获。
+    哨兵余量约 1.9 个百分点（~12 篇），只能捕获"完全崩溃"，无法捕获
+    正则在特定语料上的局部失效——那类问题由 test_e2e 的合成语料测试负责。
+    """
     import json
     out = tmp_path / "out"
     run(APPLE, out, run_id="acceptance-dates")
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     docs = manifest["documents"]
+    assert len(docs) > 0, "语料为空，无法校验"
     unknown = sum(1 for d in docs if d["date_source"] == "unknown")
-    # Apple Notes 导出本身无日期元数据，实测 unknown 率约 96%。
-    # 阈值 0.98 的含义：仅在"五级链条全部失效、所有文档都落 unknown"时触发——
-    # 实测 96.1% 低于 0.98；若链条完全断掉则会到 100%，会被此断言捕获。
     assert unknown / len(docs) < 0.98, "降级链五级全落空，说明实现有问题"

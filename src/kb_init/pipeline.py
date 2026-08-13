@@ -53,29 +53,3 @@ def run(
         emit(docs, out_dir, wikilinks=wikilinks)
         write_manifest(docs, out_dir, run_id=run_id, source=str(source))
         return summarize(docs)
-
-
-def _common_root(files: list[Path]) -> Path:
-    """推算一组文件路径的公共父目录（zip 解压场景备用工具）。
-
-    原始实现用完整路径部件（f.parts）做前缀计算，在「zip 仅含单个文件」时
-    会把文件本身当作基准（source_relpath='.'），而非其父目录。
-
-    已修复：改用父目录部件（f.parent.parts）。
-    - 单文件 /tmp/x/notes.md → /tmp/x  ✓
-    - 同级多文件 /tmp/x/a.md + /tmp/x/b.md → /tmp/x  ✓
-    - 跨目录 /tmp/x/sub1/a.md + /tmp/x/sub2/b.md → /tmp/x  ✓
-
-    注意：run() 内部已通过 ExitStack + TemporaryDirectory 显式管理 zip 临时
-    目录，_common_root 作为备用工具保留，不在主管线调用路径上。
-    """
-    if not files:
-        return Path(".")
-    parts = [f.parent.parts for f in files]
-    common: list[str] = []
-    for group in zip(*parts):
-        if len(set(group)) == 1:
-            common.append(group[0])
-        else:
-            break
-    return Path(*common) if common else Path("/")

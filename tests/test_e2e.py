@@ -64,3 +64,35 @@ def test_rerun_same_corpus_yields_same_corpus_hash(tmp_path):
     h1 = json.loads((tmp_path / "out1" / "manifest.json").read_text())["corpus_hash"]
     h2 = json.loads((tmp_path / "out2" / "manifest.json").read_text())["corpus_hash"]
     assert h1 == h2
+
+
+def test_date_resolution_chain_explicit(tmp_path):
+    """显式验证降级链：frontmatter 日期正确提取，无元数据时按序降级到 unknown。
+
+    这才是链条正确性的真正验证——Apple Notes 语料有 3/5 级天然无效，
+    无法区分"链条实现正确"与"链条实现完全错误"，所以链条测试在这里做。
+    """
+    src = _corpus(tmp_path / "src")
+    out = tmp_path / "out"
+    run(src, out, run_id="r1")
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    by_relpath = {d["source_relpath"]: d for d in manifest["documents"]}
+
+    # good1.md 与 a/b/c/dup.md 均含 frontmatter `created: 2023-04-01`。
+    # walk_source 排序后 a/b/c/dup.md 先处理（被标 kept），good1.md 被标 duplicate，
+    # 但 date 字段由 resolve_date 独立设置，与 clean 状态无关——两者均应命中 frontmatter 级。
+    for relpath in ("good1.md", "a/b/c/dup.md"):
+        doc = by_relpath[relpath]
+        assert doc["date_source"] == "frontmatter", (
+            f"{relpath}: expected frontmatter, got {doc['date_source']!r}"
+        )
+        assert doc["created"] == "2023-04-01", (
+            f"{relpath}: expected 2023-04-01, got {doc['created']!r}"
+        )
+
+    # good2.md：无 frontmatter、正文无日期串、文件名无日期前缀、tmp_path 非 git 仓库。
+    # 五级全空 → 应落 unknown，确认链条在无元数据时确实走到底而非停在某级。
+    good2 = by_relpath["good2.md"]
+    assert good2["date_source"] == "unknown", (
+        f"good2.md: expected unknown, got {good2['date_source']!r}"
+    )
