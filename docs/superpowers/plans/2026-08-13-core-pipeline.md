@@ -725,9 +725,35 @@ def test_level5_unknown_when_nothing_available(tmp_path):
 
 
 def test_never_reads_mtime(tmp_path, monkeypatch):
-    """守卫测试：任何分支都不得回退到 mtime。"""
+    """守卫测试：任何分支都不得读取 mtime。
+
+    把 st_mtime 变成会爆炸的属性——只要实现里有任何一处回退到 mtime，
+    这个测试就会红。仅断言"返回 unknown"是不够的：那种写法在实现
+    偷偷用了 mtime 时依然会通过。
+    """
+    import os
+
     f = tmp_path / "a.md"
     f.write_text("x")
+
+    real_stat = os.stat_result
+
+    class ExplodingStat:
+        def __init__(self, wrapped):
+            self._wrapped = wrapped
+
+        def __getattr__(self, name):
+            if name in ("st_mtime", "st_mtime_ns", "st_ctime", "st_ctime_ns"):
+                raise AssertionError(f"实现读取了不可信的 {name}")
+            return getattr(self._wrapped, name)
+
+    original = Path.stat
+
+    def guarded(self, *args, **kwargs):
+        return ExplodingStat(original(self, *args, **kwargs))
+
+    monkeypatch.setattr(Path, "stat", guarded)
+
     doc = _doc(body="没有日期")
     result, source = resolve_date(doc, f)
     assert result is None and source == "unknown"
