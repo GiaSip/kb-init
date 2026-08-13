@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import re
 import subprocess
 from pathlib import Path
@@ -18,9 +19,8 @@ _DATE_PATTERN = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})")
 def _normalize(y: str, m: str, d: str) -> str | None:
     try:
         year, month, day = int(y), int(m), int(d)
+        datetime.date(year, month, day)  # 验证历法合法性，拒绝 2024-02-30 等无效日期
     except ValueError:
-        return None
-    if not (1900 <= year <= 2100 and 1 <= month <= 12 and 1 <= day <= 31):
         return None
     return f"{year:04d}-{month:02d}-{day:02d}"
 
