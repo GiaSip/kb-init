@@ -37,7 +37,7 @@ def _pick_title(frontmatter: dict, body: str, path: Path) -> str:
 def parse_file(path: Path, root: Path) -> Document:
     path = Path(path)
     raw = path.read_bytes()
-    text = raw.decode("utf-8", errors="replace")
+    text = raw.decode("utf-8-sig", errors="replace")
     frontmatter, body = _split_frontmatter(text)
     relpath = path.relative_to(root).as_posix()
     return Document(

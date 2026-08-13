@@ -30,6 +30,22 @@ def test_malformed_frontmatter_does_not_crash(tmp_path):
     assert "正文" in doc.body
 
 
+def test_utf8_bom_frontmatter_is_parsed(tmp_path):
+    f = tmp_path / "bom.md"
+    content = b"\xef\xbb\xbf" + "---\ntitle: BOM 笔记\n---\n\n正文\n".encode("utf-8")
+    f.write_bytes(content)
+    doc = parse_file(f, tmp_path)
+    assert doc.frontmatter.get("title") == "BOM 笔记"
+    assert doc.title == "BOM 笔记"
+
+
+def test_frontmatter_title_wins_over_h1(tmp_path):
+    f = tmp_path / "both.md"
+    f.write_text("---\ntitle: frontmatter 标题\n---\n\n# H1 标题\n\n正文", encoding="utf-8")
+    doc = parse_file(f, tmp_path)
+    assert doc.title == "frontmatter 标题"
+
+
 def test_relpath_and_ids_are_set(tmp_path):
     sub = tmp_path / "a"
     sub.mkdir()
