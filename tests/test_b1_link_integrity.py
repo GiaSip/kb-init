@@ -239,3 +239,54 @@ def test_b1_scenario5_explicit_md_suffix_no_double_extension(tmp_path):
             if target.endswith(".md") and not (knowledge / target).exists():
                 dead.append((md_file.name, target))
     assert not dead, f"场景5死链: {dead}"
+
+
+def test_ambiguous_alias_does_not_produce_live_wrong_link(tmp_path):
+    """歧义别名必须降级为 unresolved，绝不能指向错误的那一篇。
+
+    错链比死链严重：manifest 会显示解析成功，没人会去查。
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    long_body = "内容" * 110
+    # 两篇文档的 stem 相同（不同目录），构成歧义别名
+    (src / "a").mkdir()
+    (src / "b").mkdir()
+    (src / "a" / "note.md").write_text(f"# 甲\n\n{long_body}", encoding="utf-8")
+    (src / "b" / "note.md").write_text(f"# 乙\n\n{long_body}别的", encoding="utf-8")
+    (src / "linker.md").write_text(
+        f"# 引用者\n\n见 [[note]] 的说明\n\n{long_body}", encoding="utf-8"
+    )
+    out = tmp_path / "out"
+    run(src, out, run_id="ambig")
+
+    knowledge = out / "knowledge"
+    # 两篇同 stem 不同目录的文档都必须保留（不得被误判成文件系统碰撞）
+    assert len(list(knowledge.glob("*.md"))) == 3, "不同目录的同名文档被误删了"
+
+    for f in knowledge.glob("*.md"):
+        for target in _extract_md_targets(f.read_text(encoding="utf-8")):
+            if target.endswith(".md"):
+                assert (knowledge / target).exists()
+
+
+def test_wikilinks_flag_still_remaps_standard_links(tmp_path):
+    """--wikilinks 只保留 [[...]] 方言，不得跳过标准链接的重映射。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    long_body = "内容" * 110
+    (src / "target page.md").write_text(
+        f"# Target Page\n\n{long_body}", encoding="utf-8"
+    )
+    (src / "linker.md").write_text(
+        f"# 引用者\n\n见 [标题](target%20page.md) 的说明\n\n{long_body}",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    run(src, out, wikilinks=True, run_id="wl")
+
+    knowledge = out / "knowledge"
+    for f in knowledge.glob("*.md"):
+        for target in _extract_md_targets(f.read_text(encoding="utf-8")):
+            if target.endswith(".md"):
+                assert (knowledge / target).exists(), f"{f.name} → {target}"

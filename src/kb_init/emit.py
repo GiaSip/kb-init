@@ -57,6 +57,7 @@ def _freeze_paths(docs: list[Document]) -> dict[str, str]:
     """
     used_keys: set[str] = set()
     mapping: dict[str, str] = {}
+    counts: dict[str, int] = {}
 
     for doc in docs:
         if doc.status != "kept":
@@ -71,18 +72,20 @@ def _freeze_paths(docs: list[Document]) -> dict[str, str]:
         doc.out_relpath = f"knowledge/{name}"
 
         source = Path(doc.source_relpath)
-        aliases = [
-            doc.title,
-            source.stem,
-            source.name,
-            doc.source_relpath,
-            name,                       # 自映射：让重写幂等
-            Path(name).stem,
-        ]
-        for alias in aliases:
+        # 不登记输出文件名自身：_rewrite_md_links 在 wikilink 转换之前执行，
+        # 不存在二次处理，自映射只会让「输出名恰好等于另一篇的标题」时抢占别名。
+        for alias in (doc.title, source.stem, source.name, doc.source_relpath):
             key = _norm_key(alias.strip()) if alias else ""
-            if key and key not in mapping:
-                mapping[key] = name
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+                mapping.setdefault(key, name)
+
+    # 歧义别名一律作废——先到先得会产生「活着的错链」：链接指向了错误的
+    # 那一篇，而且不会记入 unresolved，manifest 反而显示解析成功。
+    # 死链尚可被发现，错链不会。
+    for key, n in counts.items():
+        if n > 1:
+            mapping.pop(key, None)
     return mapping
 
 
@@ -134,7 +137,10 @@ def _rewrite_md_links(
 
 
 def _convert_links(
-    body: str, mapping: dict[str, str], unresolved: list[str]
+    body: str,
+    mapping: dict[str, str],
+    unresolved: list[str],
+    keep_wikilinks: bool = False,
 ) -> str:
     def repl(match: re.Match) -> str:
         raw = match.group(1).strip()
@@ -165,7 +171,9 @@ def _convert_links(
             # 顺序要紧：先重映射原有标准链接，再把 wikilink 转成标准链接。
             # 反过来会让刚生成的链接被再处理一次（自映射保证幂等，但多余）。
             remapped = _rewrite_md_links(part, mapping, unresolved)
-            result.append(_WIKILINK.sub(repl, remapped))
+            result.append(
+                remapped if keep_wikilinks else _WIKILINK.sub(repl, remapped)
+            )
         else:
             result.append(part)
     return "".join(result)
@@ -205,9 +213,9 @@ def emit(
         if doc.status != "kept":
             continue
         misses: list[str] = []
-        body = (
-            doc.body if wikilinks else _convert_links(doc.body, mapping, misses)
-        )
+        # --wikilinks 只决定「是否保留 [[...]] 方言」，**不能**跳过标准
+        # Markdown 链接的重映射——那些链接在目录拍平后同样会失效。
+        body = _convert_links(doc.body, mapping, misses, keep_wikilinks=wikilinks)
         for miss in misses:
             unresolved.append({"from_doc_id": doc.doc_id, "target": miss})
 

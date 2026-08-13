@@ -188,7 +188,11 @@ def walk_source(
                     raise UnsafeArchiveError(
                         f"total size exceeds limit {limits.max_total_bytes}"
                     )
-                key = unicodedata.normalize("NFC", entry.name).casefold()
+                # 用完整相对路径而非 basename：dir1/note.md 与 dir2/note.md
+                # 不是文件系统碰撞，拍平后的重名由出口的唯一化后缀解决。
+                # 用 basename 当键会把它们误判成碰撞并丢掉后一篇。
+                rel = entry.relative_to(source).as_posix()
+                key = unicodedata.normalize("NFC", rel).casefold()
                 prior = seen_keys.get(key)
                 if prior is not None:
                     # A.md / a.md、NFC/NFD 等价名在大小写不敏感的文件系统上

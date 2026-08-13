@@ -57,17 +57,20 @@ def run(
         # 逐篇原子（写 .tmp 再 replace）不够——第 N 篇失败时前 N-1 篇
         # 已是正式文件而 manifest 尚未写入，重跑又被 knowledge/ 非空拒绝，
         # 用户会卡在一个既不完整也无法重来的状态。
-        if (out_dir / "knowledge").exists() and any(
-            (out_dir / "knowledge").iterdir()
-        ):
+        # 拒绝任何既有内容——不只是 knowledge/。既有 manifest.json 在 POSIX
+        # 上会被静默覆盖，既有同名目录还会让发布失败。
+        if out_dir.exists() and any(out_dir.iterdir()):
             raise FileExistsError(
-                f"输出目录已存在内容，拒绝覆盖：{out_dir / 'knowledge'}。"
-                "请换一个 --out 目录。"
+                f"输出目录已存在内容，拒绝覆盖：{out_dir}。请换一个 --out 目录。"
             )
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # staging 建在**父目录**下，这样发布是「一次目录级 rename」而非
+        # 逐个产物 rename。分两次 rename 时第二次失败会留下半成品，
+        # 那就不叫整次运行原子了。
+        parent = out_dir.parent
+        parent.mkdir(parents=True, exist_ok=True)
         staging = Path(
             stack.enter_context(
-                tempfile.TemporaryDirectory(prefix=".kb-init-staging-", dir=out_dir)
+                tempfile.TemporaryDirectory(prefix=".kb-init-staging-", dir=parent)
             )
         )
 
@@ -81,7 +84,13 @@ def run(
             skipped_inputs=collisions,
         )
 
-        for item in sorted(staging.iterdir()):      # 发布
-            item.rename(out_dir / item.name)
+        # 发布：一次 rename。out_dir 若已存在（空目录）先移走，
+        # 使 rename 目标不存在——同一文件系统内 rename 是原子的。
+        if out_dir.exists():
+            out_dir.rmdir()             # 上面已确保它是空的
+        staging.rename(out_dir)
+        # 已发布，ExitStack 清理时 staging 路径已不存在，用 ignore_cleanup_errors
+        # 语义不可靠，故显式重建一个空目录让 TemporaryDirectory 的清理无害。
+        staging.mkdir(exist_ok=True)
 
         return summarize(docs)
