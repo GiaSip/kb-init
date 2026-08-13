@@ -14,17 +14,18 @@
 - **B 段（KB 管线打包）已砍**：`AgriciDaniel/claude-obsidian` 10.8k★ 已占且更完整
 - 实测地面真值已获取（`probes/kb_doctor_probe.py`）：Notion 导出 1925 篇 60% 空壳，Apple Notes 620→242 留存 39%
 
+- 2026-08-13 Codex 5.6-Sol 工程 review 完成（commit `0f411d3`）：裁决 R2/R9，抓到流水线顺序真 bug，补 §4.3 IR 合同，新增 R11–R15
+
 ## 卡住的
 
-无阻塞项。两个待裁决项（不影响开工）：
-- R2 本地 embedding 的中文质量方案
-- R9 语言/分发选型（Python+uv vs Node+npx），取决于 R2
+无阻塞项。一个待贾老师定的产品取舍：
+- **R14**：首次运行不是"秒开"（须先有 uv + 首跑下载 ~90MB 模型，按分钟计），与"对不懂的人可见"的定位有张力。当前处理是 v0.1 走 uvx + v0.2 补单二进制，待确认
 
 ## 下一步
 
-1. **Codex 工程 review** `docs/DESIGN.md`，重点裁决 R2 + R9
-2. 真装一遍 claude-obsidian 验证 R1（"它没有 X"目前只来自 README fetch）
-3. review 通过后走 writing-plans 出实施计划
+1. 真装一遍 claude-obsidian 验证 R1（"它没有内容洞察 / 不生成 CLAUDE.md / 无冷启动导入"目前**只来自一次 README 抓取**，整个定位架在这三条上）
+2. 走 writing-plans 出实施计划
+3. 实施前先在 `Archive/Apple Notes` 上验 bge-small-zh 的真实聚类质量（R2 剩余部分）
 
 ## 语料资产（已在手）
 
