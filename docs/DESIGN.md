@@ -54,17 +54,22 @@ claude-obsidian 的命令表是 `init / adopt / migrate / capture / transaction 
 ```
 kb-init ~/notion-export/
 
- [1] 归一    调现成转换器 → 统一记录 {title, body, created, path, source}
- [2] 清洗    扔掉空壳 / 去重 / 拍平深层目录
- [3] 索引    本地 embedding → 聚类 → 主题轴 + 时间轴          无需 API key
+ [1] 归一    调现成转换器 → 统一记录，分配稳定 doc_id
+ [2] 清洗    标记 kept / dropped + reason（不真删记录）
+ [3] 落盘    knowledge/*.md   标准 Markdown，**路径在此冻结**
+ [4] 索引    分块 → 本地 embedding → 聚类 → 主题轴 + 时间轴     无需 API key
              （仅服务于洞察计算，非面向用户的检索功能——见 Non-goals）
- [4] 洞察    L2 轨迹（本地）/ L3 耦合（用户自己的 key）
-             每条洞察强制挂具体文档做证据
- [5] 渲染    ├→ report.html    人看 · 可分享 · 默认脱敏
-             └→ insights.md    每条前带 [x]，用户取消勾选不认可的
- [6] 编译    kb-init compile → CLAUDE.md    只收用户勾着的条目
- [7] 落盘    knowledge/*.md   标准 Markdown
+ [5] 洞察    L2 轨迹（本地）/ L3 耦合（用户自己的 key）
+             每条洞察强制挂 doc_id 做证据
+ [6] 渲染    ├→ insights.json   不可编辑真源
+             ├→ insights.md     操作层：带可见 ID，用户只改 [x]
+             └→ report.html     呈现层：人看 · 可分享 · allowlist 脱敏
+ [7] 编译    kb-init compile → CLAUDE.md    只收勾选项，正文从 json 取
 ```
+
+**⚠️ 落盘（原第 7 步）已提前到第 3 步。** 原顺序有硬 bug：渲染出的证据链接指向 `knowledge/*.md`，而那些文件当时还没命名，链接必然指向不存在的路径。**输出路径必须在生成任何证据引用之前冻结。**
+
+这七步不是直线，是**有回边的 DAG**——清洗、聚类、人工确认之间需要稳定身份，见 §4.3。
 
 ### 4.1 双输出与裁决权
 
@@ -92,6 +97,32 @@ kb-init ~/notion-export/
 
 实现上**不需要任何 JS 或服务**：`report.html` 只管好看；真正的确认动作发生在 `insights.md`——纯文本 checklist，用户用任何编辑器取消勾选，再跑 `compile`。
 
+两者是**同一个验收界面的呈现层与操作层**，不是两个界面——产品上必须这样表述，否则会做成两个割裂的东西。
+
+**但数据真源不能是展示层**（否则用户手改必然改坏格式，而且是静默改坏）：
+
+- `insights.json` — 不可编辑真源，含 `run_id / corpus_hash / schema_version / insight_id / evidence_ids / canonical_text`
+- `insights.md` — 每条带**可见的**短 ID（不用隐藏技巧，看得见反而不容易误改），用户**只应改 `[x]` 状态**
+- `compile` 按 ID 从 json 取正文，**不信任用户修改后的文案**
+- 遇到缺失 / 重复 / 未知 ID / 跨 run 或跨 corpus → **fail closed**，报出具体行号，**绝不静默少编几条**
+- `kb-init validate insights.md` 独立可跑，`compile` 先自动调用
+
+**洞察条数硬上限 12–20 条。** 超过这个量，人肉 gate 即使格式不坏，也会因校对疲劳而失效——这是产品约束不是技术约束。
+
+> 设计克制说明：我们有过"拒绝给还没发生的流程提前建状态机"的教训（机制性预设 = jail）。此处仍加机制，是因为"用户手改文本会改坏格式"是**确定会发生**的，且静默少编几条的代价远大于报错。判据是"痛点是否已确定存在"，不是"机制是否复杂"。
+
+### 4.3 中间表示（IR）合同 — 开工前必须先定
+
+**这是 Codex review 判定的头号架构风险**：最可能让项目失败的不是 embedding 精度，而是清洗、重命名、聚类、人工确认之间**没有稳定身份和版本边界**。
+
+- **稳定 `doc_id` 在第 1 步就分配**，记录原始路径、内容 hash、日期来源、最终输出路径。拍平和去重只改变**状态**，不抹掉来源
+- **清洗是标记不是删除**：`kept / dropped + reason`。真删了，"620 → 242"这个我们最重要的数字就丢了，证据追踪也断了
+- **输出路径在第 3 步冻结**，任何证据引用只能在此之后生成
+- **分块映射持久化**：`doc_id → chunk_id`（因 §7 的 512 token 上限，必须分块）
+- **manifest 记录可复现性三要素**：聚类算法 + 随机种子 + 模型版本 + corpus_hash
+- **每步 checkpoint**，任一步失败不使前序产物报废
+- **输出到新目录 + 原子落盘，默认不覆盖已有 `CLAUDE.md`**
+
 ## 5. 洞察分层
 
 ### L1 统计（不做主角）
@@ -111,7 +142,11 @@ kb-init ~/notion-export/
 - **自称 vs 实际** — 显式声明类文档（目标/简介）与实际分布的偏差
 - **矛盾对** — 观点相反且用户自己没意识到的文档对
 
-**L3 硬约束：每条洞察必须挂具体文档做证据，无证据不输出。** 一条错误论断会让整份报告可信度归零。这套 claim 级核验在 `giasip-research` 的 Claim Ledger 已跑通，直接迁移，非新发明。
+**L3 硬约束：**
+
+1. **每条洞察必须挂 `doc_id` 做证据，无证据不输出。** 一条错误论断会让整份报告可信度归零。这套 claim 级核验在 `giasip-research` 的 Claim Ledger 已跑通，直接迁移，非新发明。
+2. **绝不遍历所有文档对。** 1925 篇 ≈ 185 万对，分块后更大。必须先用 kNN / 簇代表生成**少量候选**，再把**有数量上限**的候选交给 LLM。
+3. **L3 失败不得使已完成的产物报废。** 每步 checkpoint——API 挂了，清洗结果和 L1/L2 洞察必须还在。
 
 ### 5.1 新鲜度降级链（因 mtime 不可信）
 
@@ -144,8 +179,10 @@ kb-init ~/notion-export/
 | 产出形态 | **静态文件，不是服务** | 静态文件能直接发给别人看——而"能发给别人看"正是传播的定义 |
 | L1/L2 | 纯本地，无需 key | 免费预览层，秒出，隐私 |
 | L3 | 用户自己的 key | 不是阉割，是隐私与成本的诚实划分 |
-| 语言/分发 | **Python + uv（`uvx kb-init`）** — 待 review | 本地 embedding 生态（fastembed / model2vec）与解析生态均优于 Node；uvx 零安装体验已接近 npx |
-| 脱敏 | report.html **默认脱敏**，`--no-redact` 关闭 | 报告里蹦出真实客户名，这份报告就发不出去了 |
+| 语言/分发 | **✅ 已裁决：Python 3.12 + uv（`uvx kb-init`）** | FastEmbed + ONNX 是 R2 最稳方案且原生 Python，没必要为分发便利重造推理层；uv 在缺 Python 时能自动下载。**Node+npx 并无"真零安装"优势——它同样要求预装 Node** |
+| 本地 embedding | **✅ 已裁决：FastEmbed + `BAAI/bge-small-zh-v1.5`**（512 维 / ~90MB / ONNX CPU / 无需 GPU）<br>`model2vec`（potion-multilingual）降为 `--fast` 预览档；`multilingual-e5-small`（471MB + 前缀契约）留作多语言 fallback | 中文原生训练、体积可接受、工程风险最低。⚠️ **C-MTEB 的聚类单项并未压倒 E5，真实笔记聚类仍标"需验证"——不拿排行榜代替验收** |
+| 分块 | **强制**。先分块 embedding 再聚合成文档向量 | bge 上限 512 token，不分块 → 长笔记**静默截断**，benchmark 再好也没意义 |
+| 脱敏 | **双产物** `report.private.html` / `report.share.html`；共享版走**字段 allowlist** | 「默认脱敏 + PII 正则」制造虚假安全感。blocklist 永远补不完，allowlist 一次收敛——与我们在 headless 权限上学到的教训同构 |
 
 ## 8. Non-goals（明确不做）
 
@@ -161,25 +198,32 @@ kb-init ~/notion-export/
 | # | 项 | 处理 |
 |---|---|---|
 | R1 | §2.1 的"claude-obsidian 没有 X"全部来自单次 README fetch。README 说没有 ≠ 真没有 | **动手前真装一遍跑通** |
-| R2 | 本地 embedding 的**中文**质量未验（贾老师语料以中文为主）。候选 model2vec / fastembed+bge-small-zh / multilingual-e5-small | 在 `Archive/Apple Notes` 上做聚类质量对比 |
+| R2 | 模型已裁决（§7），但**聚类质量仍未验**——C-MTEB 聚类单项 bge 并未压倒 E5 | 在 `Archive/Apple Notes` 上做真实聚类质量验收，**不拿排行榜代替验收** |
+| **R14** | **首次运行不是"秒开"**：用户须先有 `uv`，首跑可能下载 Python + 依赖 + ~90MB 模型，按**分钟**计。这与"对不懂的人可见、10 分钟出 aha"的定位直接冲突 | ①宣传语改为"装好 uv 后一条命令运行，无需自己装 Python"，不吹零安装 ②首次运行体验按一等公民设计（进度、预估时间、下载可见）③GitHub Releases 单二进制列入 v0.2 明确路线——**但 v0.1 不同时维护两套实现** |
+| **R15** | **跨平台原生 wheel**（`onnxruntime` 等）是真正的分发风险，不是 uv 本身 | 发布前 CI 必须验 Windows x64 / macOS Intel + Apple Silicon / Linux x64 |
 | R3 | L3 瞎编导致可信度崩塌 | 证据强制挂载（§5）+ 人肉勾选 gate（§4.2），双保险 |
 | R4 | 判据阈值在优等生语料上会失真 | 用 `notion-export/`（60% 空壳）做主校准集 |
 | R5 | 只诊断不治疗 → 用户看完报告没变好 | v0.1 必须当场产出可用的 `knowledge/*.md` + `CLAUDE.md`，诊断与第一剂药同次交付 |
 | R6 | 范围爆炸滑向"做个 web app" | §7 硬边界：静态文件不是服务 |
 | R7 | 得到大脑 / flomo 的导出格式与完整度**未核验** | 选定支持源之前必须验，不拍脑袋 |
 | R8 | 一次性工具无留存 | 已知并接受（§2.2），留存靠第二次门诊，不在 v0.1 |
-| R9 | 语言/分发选型（Python+uv vs Node+npx）未定论，取决于 R2 的 embedding 方案 | 与 R2 一并由 Codex 工程 review 裁决 |
+| R9 | ~~语言/分发选型~~ | ✅ **已裁决**（2026-08-13 Codex review）：Python + uv。见 §7 |
+| **R11** | **运行版本与证据链漂移**：模型/聚类/转换器/语料变化后，旧 checklist 可能被编译进新结果 | 稳定 ID + corpus_hash + 模型版本 + 随机种子写进 manifest；**拒绝跨 run 编译**；输出到新目录、原子落盘、默认不覆盖已有 `CLAUDE.md`（见 §4.3） |
+| **R12** | **隐私边界 + "默认脱敏"的虚假安全感**：L3 会把文档片段发给外部 LLM；标题、证据路径、HTML 元数据也可能泄露身份 | 首次跑 L3 时**明示出境范围**；共享版走字段 allowlist；拆 `report.private.html` / `report.share.html` |
+| **R13** | **不可信导出包的输入安全**：zip path traversal / zip bomb / symlink 循环 / 超大文件；笔记正文里的 HTML 与 `<script>` 直接进 report.html = XSS | 安全解压 + 文件数/体积/深度/压缩比上限 + 不跟随 symlink + 流式读取 + 报告内容统一转义。**开源工具接受任意 zip，这是真实攻击面** |
 | R10 | 正式项目名未定（`kb-init` 是工作名） | 命名是营销决策，v0.1 代码可跑通后单独处理，不阻塞 |
 
 ## 10. 验收标准（v0.1 完成的定义）
 
 在 `~/Documents/notion-export/`（1925 篇、60% 空壳）上跑一次，产出：
 
-1. `report.html` — 能双击打开、无需联网、已脱敏、看完想转发
-2. `insights.md` — 每条洞察带证据链接与勾选框
+1. `report.share.html` — 能双击打开、无需联网、allowlist 脱敏、看完想转发
+2. `insights.md` — **12–20 条**洞察，每条带可见 ID + 证据链接 + 勾选框；证据链接**全部可点开**（验证 §4 落盘提前的修复生效）
 3. `CLAUDE.md` — 只含勾选项，**≤ 200 行且 ≤ 5,000 token**（超出即判定压缩失败）
 4. `knowledge/*.md` — 标准 Markdown，VS Code 中无死链
 5. 全程无需安装 Obsidian，L1/L2 全程无需 API key
+6. **改坏 `insights.md` 必须 fail closed**：删一行 ID、改一处正文、跨 run 编译，三种情况都要报错并给出行号，**不得静默通过**
+7. **恶意 zip 不得击穿**：path traversal / zip bomb / 笔记里的 `<script>` 三项各测一次
 
 ---
 
