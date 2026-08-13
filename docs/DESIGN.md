@@ -24,6 +24,18 @@
 | **CLAUDE.md 生成** | 空 | ✅ 核心 |
 | Wrapped 呈现层 | GitHub / Claude Code usage 有，vault 层无（Obsidian 生态只到 Dataview 查询 + YourPulse 活跃度） | ✅ 形式已验证 |
 
+### 2.3 R1 源码级验证（2026-08-13）
+
+§2.1 的三条空位原本只来自一次 README 抓取。已 clone 源码逐条核实（`AgriciDaniel/claude-obsidian`，5.6MB / 156 个源文件），**三条全部成立，且比 README 呈现的更彻底**：
+
+| 断言 | 源码证据 |
+|---|---|
+| **无内容洞察** | `kmeans` / `k-means` / `hdbscan` / `umap` / `sklearn` / `AgglomerativeClustering` / `topic model` / `lda` 在全部 `.py` 与 `.toml` 中**零命中**。`embedding` 仅出现在 `scripts/retrieve.py` + `rerank.py`，用途是**检索**：BM25 top-20 → 可选 cosine rerank top-5（依赖本机 Ollama，无 Ollama 则 no-op）。15 个命令中无一个是洞察类动词 |
+| **不生成 CLAUDE.md** | `CLAUDE.md` 仅出现在 `claude_obsidian/package_validation.py`，用途是把它连同 `README.md` / `WIKI.md` / `docs/*.md` 一起做**自己仓库的文档措辞一致性校验**，与用户产物无关 |
+| **无冷启动导入** | `notion` / `apple note` / `evernote` / `roam` / `logseq` 在全仓库**零命中** |
+
+**额外发现（对定位有利）**：仓库**无 `pyproject.toml` / `setup.py` / `setup.cfg`**——它不是 pip 包，而是**脚本集合 + 15 个 Claude Code skill**。也就是说它的分发形态绑定 Claude Code 生态，受众天花板是 CC 用户。我们定的**独立 CLI 是不同赛道，不构成正面竞争**。而它能拿到 10.8k★ 恰好证明这个领域的市场热度。
+
 ### 2.2 产品形态差异
 
 claude-obsidian 的命令表是 `init / adopt / migrate / capture / transaction / checkpoint / lint`——**没有一个动词是给人用的**。它是**基础设施**，服务"已经决定要长期维护知识库的人"。
@@ -197,7 +209,7 @@ kb-init ~/notion-export/
 
 | # | 项 | 处理 |
 |---|---|---|
-| R1 | §2.1 的"claude-obsidian 没有 X"全部来自单次 README fetch。README 说没有 ≠ 真没有 | **动手前真装一遍跑通** |
+| R1 | ~~"claude-obsidian 没有 X"只来自 README fetch~~ | ✅ **已验证**（2026-08-13，clone 源码逐条核，非 README）见 §2.3 |
 | R2 | 模型已裁决（§7），但**聚类质量仍未验**——C-MTEB 聚类单项 bge 并未压倒 E5 | 在 `Archive/Apple Notes` 上做真实聚类质量验收，**不拿排行榜代替验收** |
 | **R14** | **首次运行不是"秒开"**：用户须先有 `uv`，首跑可能下载 Python + 依赖 + ~90MB 模型，按**分钟**计。这与"对不懂的人可见、10 分钟出 aha"的定位直接冲突 | ①宣传语改为"装好 uv 后一条命令运行，无需自己装 Python"，不吹零安装 ②首次运行体验按一等公民设计（进度、预估时间、下载可见）③GitHub Releases 单二进制列入 v0.2 明确路线——**但 v0.1 不同时维护两套实现** |
 | **R15** | **跨平台原生 wheel**（`onnxruntime` 等）是真正的分发风险，不是 uv 本身 | 发布前 CI 必须验 Windows x64 / macOS Intel + Apple Silicon / Linux x64 |
