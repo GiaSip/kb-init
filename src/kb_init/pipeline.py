@@ -30,6 +30,8 @@ def run(
     out_dir = Path(out_dir)
     run_id = run_id or uuid.uuid4().hex[:12]
 
+    collisions: list[dict] = []
+
     with contextlib.ExitStack() as stack:
         if source.is_file() and source.suffix.lower() == ".zip":
             # ExitStack 确保 TemporaryDirectory 在 run() 返回前被删除，
@@ -38,10 +40,10 @@ def run(
                 stack.enter_context(tempfile.TemporaryDirectory(prefix="kb-init-"))
             )
             base = safe_extract(source, tmp_dir)
-            files = walk_source(base)
+            files = walk_source(base, collisions=collisions)
         else:
             base = source
-            files = walk_source(source)
+            files = walk_source(source, collisions=collisions)
 
         docs = []
         for path in files:
@@ -76,6 +78,7 @@ def run(
             run_id=run_id,
             source=str(source),
             unresolved_links=result.unresolved_links,
+            skipped_inputs=collisions,
         )
 
         for item in sorted(staging.iterdir()):      # 发布

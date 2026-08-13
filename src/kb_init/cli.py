@@ -1,5 +1,6 @@
 import argparse
 import sys
+import zipfile
 
 from kb_init import __version__
 
@@ -30,13 +31,31 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_usage(sys.stderr)
         return 2
 
+    from kb_init.extract import UnsafeArchiveError
     from kb_init.pipeline import run
 
+    # 退出码合同（见 README）：0 成功 / 1 输出冲突 / 2 用法错误
+    # / 3 输入不安全或损坏 / 4 I-O 失败。默认不向普通用户吐 traceback。
     try:
         counts = run(args.source, args.out, wikilinks=args.wikilinks)
     except FileExistsError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
+    except UnsafeArchiveError as exc:
+        print(f"错误：输入被安全检查拒绝——{exc}", file=sys.stderr)
+        return 3
+    except zipfile.BadZipFile as exc:
+        print(f"错误：zip 文件损坏或不是 zip——{exc}", file=sys.stderr)
+        return 3
+    except FileNotFoundError as exc:
+        print(f"错误：找不到输入路径——{exc}", file=sys.stderr)
+        return 3
+    except (ValueError, UnicodeError) as exc:
+        print(f"错误：输入无法处理——{exc}", file=sys.stderr)
+        return 3
+    except OSError as exc:
+        print(f"错误：读写失败——{exc}", file=sys.stderr)
+        return 4
     kept = counts["kept"]
     total = counts["total"]
     print(f"读入 {total} 篇，保留 {kept} 篇（留存 {kept / total:.0%}）" if total else "未找到 .md 文件")

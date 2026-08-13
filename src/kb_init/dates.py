@@ -13,7 +13,9 @@ from pathlib import Path
 
 from kb_init.model import Document
 
-_DATE_PATTERN = re.compile(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})")
+# 前后数字边界不可省：没有它会从更长数字串里截出 1234-5-6（法规/SKU/工程编号
+# 密集的语料里会明显聚集），而正文首个匹配会被直接升级为 created 且静默进 manifest
+_DATE_PATTERN = re.compile(r"(?<!\d)(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})(?!\d)")
 
 
 def _normalize(y: str, m: str, d: str) -> str | None:
@@ -21,6 +23,10 @@ def _normalize(y: str, m: str, d: str) -> str | None:
         year, month, day = int(y), int(m), int(d)
         datetime.date(year, month, day)  # 验证历法合法性，拒绝 2024-02-30 等无效日期
     except ValueError:
+        return None
+    if not 1900 <= year <= 2100:
+        # datetime.date 接受 1-9999，范围太宽会把"第 1234-5-6 条"当成日期。
+        # 这个区间检查曾在改用 datetime.date 校验时被一并误删（回归）。
         return None
     return f"{year:04d}-{month:02d}-{day:02d}"
 

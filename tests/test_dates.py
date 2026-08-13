@@ -143,3 +143,19 @@ def test_never_reads_mtime(tmp_path, monkeypatch):
     doc = _doc(body="没有日期")
     result, source = resolve_date(doc, f)
     assert result is None and source == "unknown"
+
+
+def test_out_of_range_year_is_rejected(tmp_path):
+    """年份区间检查：曾在改用 datetime.date 校验时被误删（回归）。"""
+    f = tmp_path / "a.md"
+    f.write_text("x")
+    assert resolve_date(_doc(body="第 1234-5-6 条规定"), f) == (None, "unknown")
+    assert resolve_date(_doc(body="见 2101-01-01 的说明"), f) == (None, "unknown")
+
+
+def test_longer_digit_run_is_not_truncated_into_a_date(tmp_path):
+    """数字边界：没有它会从 11234-5-6 里截出 1234-5-6。"""
+    f = tmp_path / "a.md"
+    f.write_text("x")
+    assert resolve_date(_doc(body="编号 11234-5-6 的工件"), f) == (None, "unknown")
+    assert resolve_date(_doc(body="版本 2020-01-011 号"), f) == (None, "unknown")

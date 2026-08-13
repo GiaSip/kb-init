@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import tempfile
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,10 @@ class ExtractLimits:
 
 def _check_entry_name(name: str) -> None:
     """在任何 I/O 前，拦截路径遍历与绝对路径条目。"""
+    if "\x00" in name:
+        # Path(name).parts 对含 null byte 的串抛 ValueError，调用方只 catch
+        # UnsafeArchiveError，会漏成裸 traceback。在此归一化为安全错误。
+        raise UnsafeArchiveError(f"null byte in entry name rejected: {name!r}")
     if name.startswith("/") or (len(name) > 1 and name[1] == ":"):
         raise UnsafeArchiveError(f"absolute path entry rejected: {name!r}")
     parts = Path(name).parts
@@ -126,7 +131,9 @@ def safe_extract(
 
 
 def walk_source(
-    source: Path, limits: ExtractLimits = ExtractLimits()
+    source: Path,
+    limits: ExtractLimits = ExtractLimits(),
+    collisions: list[dict] | None = None,
 ) -> list[Path]:
     """返回 source 下所有 .md 文件；source 是 zip 时先安全解压。
 
@@ -148,6 +155,8 @@ def walk_source(
 
     found: list[Path] = []
     total_seen = 0  # 所有文件条目（含非 .md），保持与 zip 路径 len(infos) 语义一致
+    total_md_bytes = 0
+    seen_keys: dict[str, Path] = {}
     stack = [source]
     while stack:
         current = stack.pop()
@@ -162,8 +171,36 @@ def walk_source(
                     raise UnsafeArchiveError(
                         f"file count exceeds limit {limits.max_files}"
                     )
-                if entry.suffix.lower() == ".md":
-                    if entry.stat().st_size > limits.max_file_bytes:
-                        continue
-                    found.append(entry)
+                if entry.suffix.lower() != ".md":
+                    continue
+                size = entry.stat().st_size
+                if size > limits.max_file_bytes:
+                    # 不静默跳过：静默会让输入总数与 manifest 无声少一篇，
+                    # 破坏可审计性（"读入 N 篇"这个数字必须对得上）
+                    raise UnsafeArchiveError(
+                        f"file too large: {entry.name!r} ({size} bytes)"
+                    )
+                total_md_bytes += size
+                if total_md_bytes > limits.max_total_bytes:
+                    # zip 路径在入口检查了总量，目录路径原本没有——攻击面
+                    # 不对称。数千个各自 <50MB 的文件即可耗尽内存，因为
+                    # parse_file 整文件读入且 pipeline 全程持有全部正文。
+                    raise UnsafeArchiveError(
+                        f"total size exceeds limit {limits.max_total_bytes}"
+                    )
+                key = unicodedata.normalize("NFC", entry.name).casefold()
+                prior = seen_keys.get(key)
+                if prior is not None:
+                    # A.md / a.md、NFC/NFD 等价名在大小写不敏感的文件系统上
+                    # 会互相覆盖。真实语料（尤其 macOS 的 NFD 文件名）里这
+                    # 并不罕见，所以不能 raise 掉整批——保留先到的一个，
+                    # 后来者记账跳过。静默跳过才是不可接受的：那会让"读入 N 篇"
+                    # 这个数字对不上，破坏可审计性。
+                    if collisions is not None:
+                        collisions.append(
+                            {"skipped": str(entry), "kept": str(prior)}
+                        )
+                    continue
+                seen_keys[key] = entry
+                found.append(entry)
     return sorted(found)

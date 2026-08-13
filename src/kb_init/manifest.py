@@ -29,6 +29,7 @@ def write_manifest(
     run_id: str,
     source: str,
     unresolved_links: list[dict] | None = None,
+    skipped_inputs: list[dict] | None = None,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -40,6 +41,7 @@ def write_manifest(
         "corpus_hash": compute_corpus_hash(docs),
         "counts": summarize(docs),
         "unresolved_links": unresolved_links or [],
+        "skipped_inputs": skipped_inputs or [],
         "documents": [
             {
                 "doc_id": d.doc_id,

@@ -56,3 +56,13 @@ def test_relpath_and_ids_are_set(tmp_path):
     assert len(doc.doc_id) == 16
     assert len(doc.content_hash) == 16
     assert doc.date_source == "unresolved"
+
+
+def test_oversized_frontmatter_is_skipped_not_parsed(tmp_path):
+    """YAML 锚点炸弹防线：超大 frontmatter 块直接跳过解析。"""
+    f = tmp_path / "bomb.md"
+    huge = "a: " + "x" * (70 * 1024)
+    f.write_text(f"---\n{huge}\n---\n\n正文内容", encoding="utf-8")
+    doc = parse_file(f, tmp_path)
+    assert doc.frontmatter == {}
+    assert "正文内容" in doc.body

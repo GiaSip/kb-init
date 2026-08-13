@@ -10,6 +10,7 @@ from kb_init.model import Document, compute_content_hash, compute_doc_id
 
 _FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n?", re.S)
 _H1 = re.compile(r"^#\s+(.+?)\s*$", re.M)
+_MAX_FRONTMATTER_BYTES = 64 * 1024
 
 
 def _split_frontmatter(text: str) -> tuple[dict, str]:
@@ -17,6 +18,10 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     if not match:
         return {}, text
     body = text[match.end():]
+    if len(match.group(1)) > _MAX_FRONTMATTER_BYTES:
+        # yaml.safe_load 不暴露大小限制接口，锚点展开（&a [*a,*a]*a）可指数级
+        # 耗内存。原始文件 50MB 上限挡不住解析型 DoS，在这里加块级上限。
+        return {}, body
     try:
         data = yaml.safe_load(match.group(1))
     except yaml.YAMLError:
