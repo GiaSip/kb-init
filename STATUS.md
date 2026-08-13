@@ -25,8 +25,9 @@
 ## 下一步
 
 1. ~~验证 R1~~ ✅ 2026-08-13 完成，clone 源码逐条核实，三条断言全部成立（见 DESIGN §2.3）
-2. **走 writing-plans 出实施计划** ← 当前
-3. 实施前先在 `Archive/Apple Notes` 上验 bge-small-zh 的真实聚类质量（R2 剩余部分）
+2. ~~走 writing-plans~~ ✅ Plan 1（核心管线，10 任务）已出：`docs/superpowers/plans/2026-08-13-core-pipeline.md`
+3. **执行 Plan 1** ← 当前。Plan 2（洞察与编译）待 Plan 1 完成后再写
+4. Plan 2 实施前先在 `Archive/Apple Notes` 上验 bge-small-zh 的真实聚类质量（R2 剩余部分）
 
 ## 语料资产（已在手）
 
