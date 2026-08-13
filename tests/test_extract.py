@@ -87,11 +87,33 @@ def test_walk_source_zip_bomb_rejected(tmp_path):
         walk_source(archive, limits)
 
 
-def test_walk_source_zip_oversized_file_limit(tmp_path):
-    """safe_extract 按实际流字节数挡超大文件，不信 zip 元数据声明的 file_size。"""
-    # 用一个真实的大文件（1 MB），配 max_file_bytes=500 KB
+def test_safe_extract_rejects_oversized_file(tmp_path):
+    """streaming 字节计数在超过 max_file_bytes 时即刻抛出（正常元数据，准确的 file_size）。
+
+    本测试验证「流式阈值」有效性，而非「伪造元数据绕过」场景。
+    原因：Python zipfile 用 info.file_size 限制解压输出量（ZipExtFile._left），
+    伪造 file_size 为极小值不会让实际数据绕过检查——只有声明的字节数到达调用方，
+    因此 min(claimed_size, actual_size) 自动受限，磁盘耗尽攻击无法通过此路径实施。
+    流式方案的价值是内存安全（不在 RAM 里缓冲整个文件）和及早失败。
+    """
     data = b"A" * (600 * 1024)  # 600 KB > 500 KB limit
     archive = _make_zip(tmp_path / "big.zip", {"large.md": data})
     limits = ExtractLimits(max_file_bytes=500 * 1024)
     with pytest.raises(UnsafeArchiveError):
         safe_extract(archive, tmp_path / "out", limits)
+
+
+def test_walk_source_dir_nonmd_count_enforces_limit(tmp_path):
+    """目录输入时，非 .md 文件也计入 total_seen，防止用大量 .txt 文件绕过 max_files。
+
+    zip 路径：safe_extract 在入口处用 len(infos) 统计所有条目（含 .txt）。
+    目录路径：修复前只统计 .md 文件，攻击者可塞入任意数量 .txt 绕过限制；
+              修复后 total_seen 统计所有文件条目，保持语义对称。
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(15):
+        (src / f"file{i}.txt").write_text("x")  # 15 .txt，零 .md
+    limits = ExtractLimits(max_files=10)
+    with pytest.raises(UnsafeArchiveError, match="file count"):
+        walk_source(src, limits)

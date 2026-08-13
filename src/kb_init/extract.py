@@ -45,9 +45,12 @@ def safe_extract(
     3. resolve() 双保险：即使 #1 漏网，resolve 后再比对路径边界。
        使用 Path.is_relative_to() 而非 startswith()——后者有前缀碰撞漏洞
        （/tmp/foo 会误放行 /tmp/foobar/evil 路径）。
-    4. 流式读取 + 实际字节计数：不信 zip 元数据的 file_size / compress_size——
-       恶意 zip 可以把元数据声明为极小值而实际解压体积极大。
-       每个 chunk 写入前累加实际字节，超限即刻抛出。
+    4. 流式读取 + 实际字节计数：边读边检查 max_file_bytes / max_total_bytes，
+       无需把整个文件缓冲进 RAM（safe_extract 不持有超过 _CHUNK 字节的内存）。
+       注意：Python zipfile 用 info.file_size 限制解压输出量（ZipExtFile._left），
+       因此 "伪造 file_size 为极小值" 并不会让实际数据绕过——只有 file_size 字节
+       到达调用方，磁盘占用自动受限。流式方案的价值是内存安全和及早失败，
+       而非防御元数据谎言。
     5. 压缩比用「实际解压总字节 / zip 文件真实磁盘大小」——zip 磁盘大小
        由 archive.stat().st_size 取得，无法被 zip 内容伪造。
     """
@@ -91,7 +94,7 @@ def safe_extract(
 
             resolved.parent.mkdir(parents=True, exist_ok=True)
 
-            # 流式读取：按实际字节数检查，不信元数据的 file_size / compress_size
+            # 流式读取：边读边累加实际字节（内存安全；及早检测超限）
             file_written = 0
             with zf.open(info) as src, open(resolved, "wb") as out:
                 while chunk := src.read(_CHUNK):
@@ -129,11 +132,14 @@ def walk_source(
 
     绝不跟随 symlink——symlink 循环会让遍历永不终止。
     zip 路径：symlink / 文件数上限 / 单文件体积上限均生效：
-      - safe_extract 流式挡超大文件（实际字节，不信元数据）
+      - safe_extract 流式挡超大文件（实际字节，及早检测）
       - 提取后的目录遍历跳过 symlink（safe_extract 不会创建 symlink，
         但对目录输入依然需要此保护）
-      - 目录遍历的文件计数同样受 max_files 约束
-    注意：临时目录不会自动清理（清理会使返回的路径失效）。
+      - 目录遍历的总文件计数（含非 .md）受 max_files 约束
+    注意：
+      - total_seen 统计所有文件条目，不只是 .md——防止攻击者用大量 .txt 文件
+        绕过 max_files 保护（zip 路径在入口处 len(infos) 已统计所有条目）。
+      - 临时目录不会自动清理（清理会使返回的路径失效）。
     """
     source = Path(source)
     if source.is_file() and source.suffix.lower() == ".zip":
@@ -141,6 +147,7 @@ def walk_source(
         source = safe_extract(source, tmp, limits)
 
     found: list[Path] = []
+    total_seen = 0  # 所有文件条目（含非 .md），保持与 zip 路径 len(infos) 语义一致
     stack = [source]
     while stack:
         current = stack.pop()
@@ -149,12 +156,14 @@ def walk_source(
                 continue
             if entry.is_dir():
                 stack.append(entry)
-            elif entry.suffix.lower() == ".md":
-                if entry.stat().st_size > limits.max_file_bytes:
-                    continue
-                found.append(entry)
-                if len(found) > limits.max_files:
+            else:
+                total_seen += 1
+                if total_seen > limits.max_files:
                     raise UnsafeArchiveError(
                         f"file count exceeds limit {limits.max_files}"
                     )
+                if entry.suffix.lower() == ".md":
+                    if entry.stat().st_size > limits.max_file_bytes:
+                        continue
+                    found.append(entry)
     return sorted(found)
