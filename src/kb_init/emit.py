@@ -12,7 +12,10 @@ from pathlib import Path
 from kb_init.model import Document
 
 _UNSAFE = re.compile(r"[^\w一-鿿\- ]+")
-_WIKILINK = re.compile(r"\[\[([^\]\|#]+?)(?:\|([^\]]+?))?\]\]")
+# group 1 = target（允许 # 锚点），group 2 = 可选别名
+_WIKILINK = re.compile(r"\[\[([^\]\|]+?)(?:\|([^\]]+?))?\]\]")
+# 围栏式代码块或行内反引号——替换时跳过其内容
+_CODE_FENCE = re.compile(r"(```[\s\S]*?```|`[^`\n]+`)")
 
 
 def _slugify(title: str, fallback: str) -> str:
@@ -22,10 +25,22 @@ def _slugify(title: str, fallback: str) -> str:
 
 def _convert_links(body: str) -> str:
     def repl(match: re.Match) -> str:
-        target = match.group(1).strip()
-        label = (match.group(2) or target).strip()
-        return f"[{label}]({target}.md)"
-    return _WIKILINK.sub(repl, body)
+        target_full = match.group(1).strip()
+        label = (match.group(2) or target_full).strip()
+        if "#" in target_full:
+            target_file, anchor = target_full.split("#", 1)
+            return f"[{label}]({target_file}.md#{anchor})"
+        return f"[{label}]({target_full}.md)"
+
+    # 分段处理：_CODE_FENCE.split 奇数索引为代码块，偶数索引为普通文本
+    parts = _CODE_FENCE.split(body)
+    result = []
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            result.append(_WIKILINK.sub(repl, part))
+        else:
+            result.append(part)
+    return "".join(result)
 
 
 def emit(
@@ -45,8 +60,10 @@ def emit(
             continue
         slug = _slugify(doc.title, doc.doc_id)
         name = f"{slug}.md"
-        if name in used:
-            name = f"{slug}-{doc.doc_id[:6]}.md"
+        counter = 1
+        while name in used:
+            name = f"{slug}-{counter}.md"
+            counter += 1
         used.add(name)
 
         body = doc.body if wikilinks else _convert_links(doc.body)
