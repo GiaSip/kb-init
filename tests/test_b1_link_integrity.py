@@ -371,6 +371,97 @@ def test_relative_md_link_follows_parent_traversal(tmp_path):
     assert "](甲.md)" not in body, "../ 被忽略，解析到了当前目录的同名文档"
 
 
+def test_relative_md_link_does_not_fall_back_to_export_root(tmp_path):
+    """根目录不是「另一个可以试试的基准」——它就是另一个目录。
+
+    `a/linker.md` 里的 `(note.md)` 只可能是 `a/note.md`。仓库里只有根目录的
+    `note.md` 时，把链接接过去和接到 `b/note.md` 是同一类错链，只是目标恰好
+    在根上。链接基准只能有一个：当前文档所在目录（CommonMark 语义）。
+    """
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "note.md").write_text(f"# 根篇\n\n{long_body}根的正文", encoding="utf-8")
+    (src / "a" / "linker.md").write_text(
+        f"# 引用者\n\n见 [说明](note.md) 一节\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="root-base")
+
+    body = _linker_body(out)
+    assert "](根篇.md)" not in body, "回退到导出根，产生了跨目录错链"
+    assert "note.md" in _unresolved_targets(out)
+
+
+def test_wikilinks_flag_rewrites_target_to_frozen_output_name(tmp_path):
+    """--wikilinks 也必须先解析：输出文件名是 slug 化过的，原样保留就是死链。
+
+    `[[Project A]]` 的目标落盘为 `Project-A.md`，在 Obsidian 里 `[[Project A]]`
+    同样点不开。保留方言 ≠ 保留未解析的原文。
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    long_body = "内容" * 110
+    (src / "target.md").write_text(f"# Project A\n\n{long_body}", encoding="utf-8")
+    (src / "linker.md").write_text(
+        f"# 引用者\n\n见 [[Project A]] 的说明\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, wikilinks=True, run_id="wl-freeze")
+
+    body = _linker_body(out)
+    assert "[[Project-A" in body, "wikilink 没有被重写到冻结后的输出名"
+    assert "[[Project A]]" not in body, "保留了指向不存在文件名的原始 wikilink"
+
+
+def test_wikilinks_flag_degrades_ambiguous_alias(tmp_path):
+    """--wikilinks 下歧义别名同样不许留——Obsidian 会自己挑一篇，挑中哪篇没人知道。"""
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    (src / "b").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "a" / "x.md").write_text(f"# 同名\n\n{long_body}甲", encoding="utf-8")
+    (src / "b" / "y.md").write_text(f"# 同名\n\n{long_body}乙", encoding="utf-8")
+    (src / "linker.md").write_text(
+        f"# 引用者\n\n见 [[同名]] 的说明\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, wikilinks=True, run_id="wl-ambig")
+
+    body = _linker_body(out)
+    assert "[[同名]]" not in body, "歧义 wikilink 被原样保留，Obsidian 会静默指向其中一篇"
+    assert "同名" in body, "降级后的纯文本应保留原标签"
+    assert "同名" in _unresolved_targets(out), "歧义 wikilink 未记入 unresolved_links"
+
+
+def test_md_link_to_filename_containing_hash_with_real_anchor(tmp_path):
+    """文件名含 `#` 且**同时**带真锚点：`it/#01 Piero.md#section`。
+
+    只试「整串当路径」不够——整串以 `#section` 结尾，不是 .md。必须按每个 `#`
+    的位置逐个生成候选，用 by_path 的实际命中来决定哪一段是文件名。
+    """
+    src = tmp_path / "src"
+    (src / "it").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "it" / "#01 Piero abc.md").write_text(
+        f"# Piero Portaluppi\n\n{long_body}", encoding="utf-8"
+    )
+    (src / "index.md").write_text(
+        f"# 引用者\n\n见 [标题](it/#01%20Piero%20abc.md#section) 一节\n\n{long_body}",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="hash-anchor")
+
+    assert "](Piero-Portaluppi.md#section)" in _linker_body(out), (
+        "含 # 的文件名 + 真锚点没有被正确切分"
+    )
+
+
 def test_md_link_to_filename_containing_hash(tmp_path):
     """文件名里含 `#` 的目标不能被当成锚点切掉。
 

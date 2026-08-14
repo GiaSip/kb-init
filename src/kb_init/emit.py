@@ -43,10 +43,15 @@ class _LinkIndex:
     `by_path` 是**路径**语义（标准 Markdown 链接：相对当前文档所在目录解析）。
     混用一张表就会拿名字去解释路径——`a/linker.md` 里的 `(note.md)` 被接到
     `b/note.md` 上，产出「活着的错链」。
+
+    `ambiguous_aliases` 单独留着：解析失败有两种，处理方式不同——「从来没有过
+    这个目标」在 wikilink 方言下是合法的未创建链接，可以原样保留；「匹配到多篇」
+    则必须降级，否则 Obsidian 会替我们挑一篇，挑中哪篇没人知道。
     """
 
     by_alias: dict[str, str]
     by_path: dict[str, str]
+    ambiguous_aliases: frozenset[str]
 
 
 def _norm_key(text: str) -> str:
@@ -108,15 +113,17 @@ def _freeze_paths(docs: list[Document]) -> _LinkIndex:
     # 歧义别名一律作废——先到先得会产生「活着的错链」：链接指向了错误的
     # 那一篇，而且不会记入 unresolved，manifest 反而显示解析成功。
     # 死链尚可被发现，错链不会。
-    for key, doc_ids in owners.items():
-        if len(doc_ids) > 1:
-            mapping.pop(key, None)
+    ambiguous = {key for key, doc_ids in owners.items() if len(doc_ids) > 1}
+    for key in ambiguous:
+        mapping.pop(key, None)
     # 源路径本该天然唯一（walk_source 已按文件系统等价键拦过碰撞），这里是兜底：
     # 真出现两篇归一后同路径时宁可都不解析，也不赌其中一篇。
     for key, doc_ids in path_owners.items():
         if len(doc_ids) > 1:
             by_path.pop(key, None)
-    return _LinkIndex(by_alias=mapping, by_path=by_path)
+    return _LinkIndex(
+        by_alias=mapping, by_path=by_path, ambiguous_aliases=frozenset(ambiguous)
+    )
 
 
 def _resolve_source_path(
@@ -124,8 +131,9 @@ def _resolve_source_path(
 ) -> str | None:
     """按**路径**语义解析标准 Markdown 相对链接。
 
-    基准是当前文档所在目录，其次是导出根（Obsidian 的「相对 vault 根」
-    设置会把链接写成不带前导斜杠的根相对路径）。两者都是全路径精确匹配。
+    基准**只有一个**：当前文档所在目录（CommonMark 语义）。曾经试过"当前目录
+    不中就退回导出根"，那是在猜链接是用哪种基准写的——根目录不是"另一个可以
+    试试的基准"，它就是另一个目录，接过去和接到 `b/note.md` 是同一类错链。
 
     **刻意不做 basename/stem 兜底**：`a/linker.md` 里的 `(note.md)` 在
     Markdown 语义下只可能是 `a/note.md`；仓库里只有 `b/note.md` 时把链接
@@ -133,14 +141,10 @@ def _resolve_source_path(
     显示解析成功。死链有人报，错链没人查，所以宁可降级为纯文本并记账。
     （wikilink 是名字语义，不受此限，走 `_resolve_target`。）
     """
-    for base in (source_dir, ""):
-        joined = posixpath.normpath(posixpath.join(base, target))
-        if joined == ".." or joined.startswith("../"):
-            continue                    # 逃出导出根的路径不可能对应任何文档
-        hit = by_path.get(_norm_key(joined))
-        if hit is not None:
-            return hit
-    return None
+    joined = posixpath.normpath(posixpath.join(source_dir, target))
+    if joined == ".." or joined.startswith("../"):
+        return None                     # 逃出导出根的路径不可能对应任何文档
+    return by_path.get(_norm_key(joined))
 
 
 def _resolve_target(target: str, mapping: dict[str, str]) -> str | None:
@@ -153,6 +157,20 @@ def _resolve_target(target: str, mapping: dict[str, str]) -> str | None:
     if target.lower().endswith(".md"):
         return mapping.get(_norm_key(target[:-3]))
     return None
+
+
+def _is_ambiguous(target: str, index: _LinkIndex) -> bool:
+    """该引用写法是否匹配到多篇文档（登记时已作废，此处只回答"为什么失败"）。
+
+    查法必须与 `_resolve_target` 一致：同样要试剥掉 `.md` 后缀的写法，
+    否则 `[[foo.md]]` 的歧义会被误判成"从来没有过"。
+    """
+    key = _norm_key(target)
+    if key in index.ambiguous_aliases:
+        return True
+    if target.lower().endswith(".md"):
+        return _norm_key(target[:-3]) in index.ambiguous_aliases
+    return False
 
 
 def _rewrite_md_links(
@@ -173,24 +191,29 @@ def _rewrite_md_links(
         if target.startswith(("http://", "https://", "mailto:", "#", "/")):
             return match.group(0)       # 外链与同文件锚点不动
 
-        path_part, _, anchor = target.partition("#")
-        decoded = unquote(path_part)
-        if not decoded.lower().endswith(".md"):
-            # 文件名本身含 `#` 的情形：Notion 允许页面标题以 `#` 开头，导出的
-            # 文件名就带 `#` 且链接里不做 URL 编码。按锚点切完只剩目录部分，
-            # 会让链接原样留下变成死链。先按锚点解释（上面），不成立再把整串
-            # 当路径试一次——顺序不能反，否则 `a.md#b.md` 的锚点会被吞进路径。
-            whole = unquote(target)
-            if not whole.lower().endswith(".md"):
-                return match.group(0)   # 非 .md 目标（图片等）不动
-            decoded, anchor = whole, ""
+        # `#` 在链接里有两种身份，只看字符分不出来：锚点分隔符，或文件名的
+        # 一部分（Notion 允许页面标题以 `#` 开头，导出的文件名就带 `#`，且
+        # 链接里不做 URL 编码）。所以按每个 `#` 的位置逐个生成候选，由
+        # by_path 的实际命中来裁决——从最早的切分点开始，整串当文件名放最后，
+        # 保证常规的 `foo.md#小节` 优先按锚点解释。
+        splits = [(target[:i], target[i + 1:]) for i, ch in enumerate(target) if ch == "#"]
+        splits.append((target, ""))
+        candidates = [
+            (unquote(path_part), anchor)
+            for path_part, anchor in splits
+            if unquote(path_part).lower().endswith(".md")
+        ]
+        if not candidates:
+            return match.group(0)       # 非 .md 目标（图片等）不动
 
-        name = _resolve_source_path(decoded, source_dir, index.by_path)
-        if name is None:
-            unresolved.append(decoded)
-            return label                # 不留死链
-        suffix = f"#{anchor}" if anchor else ""
-        return f"[{label}]({name}{suffix})"
+        for decoded, anchor in candidates:
+            name = _resolve_source_path(decoded, source_dir, index.by_path)
+            if name is not None:
+                suffix = f"#{anchor}" if anchor else ""
+                return f"[{label}]({name}{suffix})"
+
+        unresolved.append(candidates[0][0])
+        return label                    # 不留死链
 
     return _MDLINK.sub(repl, text)
 
@@ -212,16 +235,30 @@ def _convert_links(
             target, anchor = raw.split("#", 1)
             target = target.strip()
             if not target:
-                return f"[{label}](#{anchor})"  # [[#小节]] 同文件锚点
+                # [[#小节]] 同文件锚点
+                return match.group(0) if keep_wikilinks else f"[{label}](#{anchor})"
 
         name = _resolve_target(target, index.by_alias)
-        if name is None:
-            # 目标不存在（从未有过，或被判空壳/重复而没有输出文件）。
-            # 绝不产生指向不存在文件的链接——退化为纯文本并记账。
-            unresolved.append(target)
-            return label
         suffix = f"#{anchor}" if anchor else ""
-        return f"[{label}]({name}{suffix})"
+        if name is not None:
+            if not keep_wikilinks:
+                return f"[{label}]({name}{suffix})"
+            # 方言模式同样要重写：输出文件名是 slug 化过的（`Project A` →
+            # `Project-A.md`），原样留着 `[[Project A]]` 在 Obsidian 里一样点不开。
+            stem = name[:-3] if name.lower().endswith(".md") else name
+            return f"[[{stem}{suffix}]]" if stem == label else f"[[{stem}{suffix}|{label}]]"
+
+        if keep_wikilinks and not _is_ambiguous(target, index):
+            # 方言模式下「目标从来没有过」是合法的未创建链接（Obsidian 里点击
+            # 即新建），保留原文；但仍记账，让 manifest 说得清有多少悬空引用。
+            unresolved.append(target)
+            return match.group(0)
+
+        # 目标不存在（从未有过，或被判空壳/重复而没有输出文件），或别名歧义。
+        # 绝不产生指向不存在文件的链接，也绝不把歧义交给 Obsidian 去挑一篇
+        # ——退化为纯文本并记账。
+        unresolved.append(target)
+        return label
 
     # 分段处理：_CODE_FENCE.split 奇数索引为代码块，偶数索引为普通文本
     parts = _CODE_FENCE.split(body)
@@ -231,9 +268,10 @@ def _convert_links(
             # 顺序要紧：先重映射原有标准链接，再把 wikilink 转成标准链接。
             # 反过来会让刚生成的链接被再处理一次（自映射保证幂等，但多余）。
             remapped = _rewrite_md_links(part, index, unresolved, source_dir)
-            result.append(
-                remapped if keep_wikilinks else _WIKILINK.sub(repl, remapped)
-            )
+            # wikilink 一律要过 repl，keep_wikilinks 只改**输出语法**，不是
+            # 跳过解析：跳过就等于把「目标叫什么」交给 Obsidian 猜，slug 化后
+            # 的输出名和歧义别名都会静默指错。
+            result.append(_WIKILINK.sub(repl, remapped))
         else:
             result.append(part)
     return "".join(result)
