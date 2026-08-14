@@ -437,6 +437,77 @@ def test_wikilinks_flag_degrades_ambiguous_alias(tmp_path):
     assert "同名" in _unresolved_targets(out), "歧义 wikilink 未记入 unresolved_links"
 
 
+def _build_cross_alias_corpus(src: Path) -> None:
+    """构造「精确别名歧义、但剥掉 .md 后唯一」的交叉别名语料。
+
+    甲：源文件 `foo.md`，标题「甲」  → 别名 {甲, foo, foo.md}
+    乙：源文件 `bar.md`，标题「foo.md」→ 别名 {foo.md, bar, bar.md}
+    于是 `foo.md` 是歧义别名，而 `foo` 唯一指向甲。
+    """
+    src.mkdir(parents=True, exist_ok=True)
+    long_body = "内容" * 110
+    (src / "foo.md").write_text(f"# 甲\n\n{long_body}甲的正文", encoding="utf-8")
+    (src / "bar.md").write_text(f"# foo.md\n\n{long_body}乙的正文", encoding="utf-8")
+    (src / "linker.md").write_text(
+        f"# 引用者\n\n见 [[foo.md]] 的说明\n\n{long_body}", encoding="utf-8"
+    )
+
+
+def test_md_suffix_fallback_does_not_bypass_exact_alias_ambiguity(tmp_path):
+    """精确写法已判歧义时，剥掉 `.md` 再查一次不能把它救活。
+
+    解析必须是三态：精确键一旦歧义就停手，只有精确键**根本不存在**时才允许
+    降级到剥后缀的写法。否则「歧义不猜」被一个回退分支绕过——而且因为解析
+    成功了，歧义判定根本不会被执行。
+    """
+    src = tmp_path / "src"
+    _build_cross_alias_corpus(src)
+
+    out = tmp_path / "out"
+    run(src, out, run_id="cross-alias")
+
+    body = _linker_body(out)
+    assert "](甲.md)" not in body, "歧义别名经 .md 回退静默指向了甲"
+    assert "](foomd.md)" not in body, "歧义别名经 .md 回退静默指向了乙"
+    assert "foo.md" in _unresolved_targets(out)
+
+
+def test_md_suffix_fallback_ambiguity_also_blocked_under_wikilinks(tmp_path):
+    """同一漏口在方言模式下同样要堵——保留 `[[foo.md]]` 等于让 Obsidian 去挑。"""
+    src = tmp_path / "src"
+    _build_cross_alias_corpus(src)
+
+    out = tmp_path / "out"
+    run(src, out, wikilinks=True, run_id="cross-alias-wl")
+
+    body = _linker_body(out)
+    assert "[[甲" not in body and "[[foomd" not in body, "歧义别名被重写到了某一篇"
+    assert "[[foo.md]]" not in body, "歧义 wikilink 被原样保留，Obsidian 会替我们挑一篇"
+    assert "foo.md" in _unresolved_targets(out)
+
+
+def test_wikilinks_keeps_dropped_target_as_uncreated_link(tmp_path):
+    """方言模式下「没有输出文件的目标」一律视为未创建链接，原样保留并记账。
+
+    空壳 / 重复被丢弃的文档没有输出文件，与「从来没有过这个目标」在产物层面
+    不可区分，也没有指错的风险——保留 `[[...]]` 是 Obsidian 的既定语义。
+    这条测试把该语义钉住，免得注释与行为再次对不上。
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    long_body = "内容" * 110
+    (src / "stub.md").write_text("# 短篇\n\n短", encoding="utf-8")
+    (src / "linker.md").write_text(
+        f"# 引用者\n\n见 [[短篇]] 的说明\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, wikilinks=True, run_id="wl-stub")
+
+    assert "[[短篇]]" in _linker_body(out), "被丢弃目标的 wikilink 应作为未创建链接保留"
+    assert "短篇" in _unresolved_targets(out), "未创建链接仍须记账"
+
+
 def test_md_link_to_filename_containing_hash_with_real_anchor(tmp_path):
     """文件名含 `#` 且**同时**带真锚点：`it/#01 Piero.md#section`。
 

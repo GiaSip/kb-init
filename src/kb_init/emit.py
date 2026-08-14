@@ -139,7 +139,7 @@ def _resolve_source_path(
     Markdown 语义下只可能是 `a/note.md`；仓库里只有 `b/note.md` 时把链接
     接过去，产出的是「活着的错链」——正文指向一篇不相干的文档，而 manifest
     显示解析成功。死链有人报，错链没人查，所以宁可降级为纯文本并记账。
-    （wikilink 是名字语义，不受此限，走 `_resolve_target`。）
+    （wikilink 是名字语义，不受此限，走 `_resolve_alias`。）
     """
     joined = posixpath.normpath(posixpath.join(source_dir, target))
     if joined == ".." or joined.startswith("../"):
@@ -147,30 +147,25 @@ def _resolve_source_path(
     return by_path.get(_norm_key(joined))
 
 
-def _resolve_target(target: str, mapping: dict[str, str]) -> str | None:
-    """按引用写法查出实际文件名；查不到返回 None。"""
-    hit = mapping.get(_norm_key(target))
-    if hit is not None:
-        return hit
-    # `[[foo.md]]` 这类自带后缀的写法：剥掉后缀再查一次，
-    # 否则会拼出 foo.md.md
-    if target.lower().endswith(".md"):
-        return mapping.get(_norm_key(target[:-3]))
-    return None
+def _resolve_alias(target: str, index: _LinkIndex) -> tuple[str | None, bool]:
+    """按**名字**语义解析 wikilink，返回 `(输出文件名, 是否歧义)`。
 
-
-def _is_ambiguous(target: str, index: _LinkIndex) -> bool:
-    """该引用写法是否匹配到多篇文档（登记时已作废，此处只回答"为什么失败"）。
-
-    查法必须与 `_resolve_target` 一致：同样要试剥掉 `.md` 后缀的写法，
-    否则 `[[foo.md]]` 的歧义会被误判成"从来没有过"。
+    必须是三态（命中 / 歧义 / 没有），不能只回答"有没有命中"：
+    `[[foo.md]]` 这类自带后缀的写法要剥掉后缀再查一次（否则拼出 foo.md.md），
+    但**精确写法一旦判为歧义就必须停手**。否则会出现「精确键 `foo.md` 同时匹配
+    两篇已作废，剥成 `foo` 后唯一命中其中一篇」——歧义被回退分支绕过，而且因为
+    解析成功了，歧义检查根本不会被执行，产出的正是「活着的错链」。
     """
-    key = _norm_key(target)
-    if key in index.ambiguous_aliases:
-        return True
+    keys = [_norm_key(target)]
     if target.lower().endswith(".md"):
-        return _norm_key(target[:-3]) in index.ambiguous_aliases
-    return False
+        keys.append(_norm_key(target[:-3]))
+    for key in keys:
+        if key in index.ambiguous_aliases:
+            return None, True
+        hit = index.by_alias.get(key)
+        if hit is not None:
+            return hit, False
+    return None, False
 
 
 def _rewrite_md_links(
@@ -238,7 +233,7 @@ def _convert_links(
                 # [[#小节]] 同文件锚点
                 return match.group(0) if keep_wikilinks else f"[{label}](#{anchor})"
 
-        name = _resolve_target(target, index.by_alias)
+        name, ambiguous = _resolve_alias(target, index)
         suffix = f"#{anchor}" if anchor else ""
         if name is not None:
             if not keep_wikilinks:
@@ -248,16 +243,15 @@ def _convert_links(
             stem = name[:-3] if name.lower().endswith(".md") else name
             return f"[[{stem}{suffix}]]" if stem == label else f"[[{stem}{suffix}|{label}]]"
 
-        if keep_wikilinks and not _is_ambiguous(target, index):
-            # 方言模式下「目标从来没有过」是合法的未创建链接（Obsidian 里点击
-            # 即新建），保留原文；但仍记账，让 manifest 说得清有多少悬空引用。
-            unresolved.append(target)
+        unresolved.append(target)
+        if keep_wikilinks and not ambiguous:
+            # 方言模式下「没有输出文件的目标」一律视为未创建链接（Obsidian 里
+            # 点击即新建），保留原文。空壳/重复被丢弃的目标与从来没有过的目标
+            # 在产物层面不可区分，也都没有指错的风险——只有歧义必须降级。
             return match.group(0)
 
-        # 目标不存在（从未有过，或被判空壳/重复而没有输出文件），或别名歧义。
-        # 绝不产生指向不存在文件的链接，也绝不把歧义交给 Obsidian 去挑一篇
-        # ——退化为纯文本并记账。
-        unresolved.append(target)
+        # 解析不到就绝不留下指向不存在文件的链接；歧义则绝不交给 Obsidian
+        # 去挑一篇——两者都退化为纯文本，并已记账。
         return label
 
     # 分段处理：_CODE_FENCE.split 奇数索引为代码块，偶数索引为普通文本
