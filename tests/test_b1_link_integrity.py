@@ -279,6 +279,141 @@ def test_ambiguous_alias_does_not_produce_live_wrong_link(tmp_path):
     assert "note" in targets, f"歧义链接未记入 unresolved_links：{targets}"
 
 
+def _linker_body(out: Path) -> str:
+    knowledge = out / "knowledge"
+    linker = next(f for f in knowledge.glob("*.md") if "引用者" in f.stem)
+    return linker.read_text(encoding="utf-8")
+
+
+def _unresolved_targets(out: Path) -> list[str]:
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    return [u["target"] for u in manifest["unresolved_links"]]
+
+
+def test_relative_md_link_must_not_cross_directories(tmp_path):
+    """`a/linker.md` 里的 `(note.md)` 只可能指 `a/note.md`。
+
+    仓库里只有 `b/note.md` 时，按 basename 兜底会产出「活着的错链」——
+    manifest 显示解析成功，正文却指向了另一个目录里一篇不相干的文档。
+    错链比死链危险：死链有人报，错链没人查。必须降级为纯文本并记账。
+    """
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    (src / "b").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "b" / "note.md").write_text(f"# 乙\n\n{long_body}乙的正文", encoding="utf-8")
+    (src / "a" / "linker.md").write_text(
+        f"# 引用者\n\n见 [说明](note.md) 一节\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="reldir-miss")
+
+    body = _linker_body(out)
+    assert "](乙.md)" not in body, "跨目录 basename 兜底产生了活着的错链"
+    assert "说明" in body, "降级后的纯文本应保留原标签"
+    assert "note.md" in _unresolved_targets(out), "跨目录未命中的链接必须记入 unresolved_links"
+
+
+def test_relative_md_link_resolves_within_own_directory(tmp_path):
+    """同目录内的相对链接必须照常解析——严格化不能把正常链接一起打死。"""
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "a" / "note.md").write_text(f"# 甲\n\n{long_body}甲的正文", encoding="utf-8")
+    (src / "a" / "linker.md").write_text(
+        f"# 引用者\n\n见 [说明](note.md) 一节\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="reldir-hit")
+
+    assert "](甲.md)" in _linker_body(out), "同目录相对链接被误降级"
+
+
+def test_relative_md_link_prefers_own_directory_over_ambiguous_basename(tmp_path):
+    """同 basename 存在多篇时，来源目录上下文能消歧——不该退化成 unresolved。"""
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    (src / "b").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "a" / "note.md").write_text(f"# 甲\n\n{long_body}甲的正文", encoding="utf-8")
+    (src / "b" / "note.md").write_text(f"# 乙\n\n{long_body}乙的正文", encoding="utf-8")
+    (src / "a" / "linker.md").write_text(
+        f"# 引用者\n\n见 [说明](note.md) 一节\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="reldir-disambig")
+
+    body = _linker_body(out)
+    assert "](甲.md)" in body, "来源目录上下文没有用于消歧"
+    assert "](乙.md)" not in body, "解析到了另一个目录里的同名文档"
+
+
+def test_relative_md_link_follows_parent_traversal(tmp_path):
+    """`../b/note.md` 要按路径语义归一后解析，而不是靠 basename 撞运气。"""
+    src = tmp_path / "src"
+    (src / "a").mkdir(parents=True)
+    (src / "b").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "a" / "note.md").write_text(f"# 甲\n\n{long_body}甲的正文", encoding="utf-8")
+    (src / "b" / "note.md").write_text(f"# 乙\n\n{long_body}乙的正文", encoding="utf-8")
+    (src / "a" / "linker.md").write_text(
+        f"# 引用者\n\n见 [说明](../b/note.md) 一节\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="reldir-parent")
+
+    body = _linker_body(out)
+    assert "](乙.md)" in body, "../ 相对路径没有被正确归一"
+    assert "](甲.md)" not in body, "../ 被忽略，解析到了当前目录的同名文档"
+
+
+def test_md_link_to_filename_containing_hash(tmp_path):
+    """文件名里含 `#` 的目标不能被当成锚点切掉。
+
+    Notion 允许页面标题以 `#` 开头（`#01.1.2 Piero Portaluppi`），导出后
+    文件名就带 `#`，且链接里的 `#` 不做 URL 编码。按锚点切分后路径部分
+    只剩 `意大利设计/`，不以 .md 结尾 → 链接被原样留下 → 目录拍平后成死链。
+    真实 Notion 语料里这一类占死链的绝大多数（15 条里 11 条）。
+    """
+    src = tmp_path / "src"
+    (src / "it").mkdir(parents=True)
+    long_body = "内容" * 110
+    (src / "it" / "#01 Piero abc.md").write_text(
+        f"# Piero Portaluppi\n\n{long_body}", encoding="utf-8"
+    )
+    (src / "index.md").write_text(
+        f"# 引用者\n\n见 [标题](it/#01%20Piero%20abc.md) 一节\n\n{long_body}",
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="hash-name")
+
+    body = _linker_body(out)
+    assert "](Piero-Portaluppi.md)" in body, "含 # 的文件名被当成锚点切掉了"
+    assert (out / "knowledge" / "Piero-Portaluppi.md").exists()
+
+
+def test_md_link_anchor_still_split_when_path_is_md(tmp_path):
+    """路径部分本身就是 .md 时，`#` 之后仍按锚点处理——不得被上一条的修法带偏。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    long_body = "内容" * 110
+    (src / "target.md").write_text(f"# 目标\n\n{long_body}", encoding="utf-8")
+    (src / "index.md").write_text(
+        f"# 引用者\n\n见 [标题](target.md#小节) 一节\n\n{long_body}", encoding="utf-8"
+    )
+
+    out = tmp_path / "out"
+    run(src, out, run_id="anchor-keep")
+
+    assert "](目标.md#小节)" in _linker_body(out), "锚点被吞掉或路径解析错误"
+
+
 def test_wikilinks_flag_still_remaps_standard_links(tmp_path):
     """--wikilinks 只保留 [[...]] 方言，不得跳过标准链接的重映射。"""
     src = tmp_path / "src"

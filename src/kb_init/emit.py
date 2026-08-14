@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import posixpath
 import re
 import unicodedata
 from urllib.parse import unquote
@@ -34,6 +35,20 @@ class EmitResult:
     unresolved_links: list[dict] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _LinkIndex:
+    """两种引用语义各用一张表，不能合并。
+
+    `by_alias` 是**名字**语义（wikilink：Obsidian 按全库文件名解析，与目录无关）；
+    `by_path` 是**路径**语义（标准 Markdown 链接：相对当前文档所在目录解析）。
+    混用一张表就会拿名字去解释路径——`a/linker.md` 里的 `(note.md)` 被接到
+    `b/note.md` 上，产出「活着的错链」。
+    """
+
+    by_alias: dict[str, str]
+    by_path: dict[str, str]
+
+
 def _norm_key(text: str) -> str:
     """文件系统等价键：NFC 归一 + casefold。
 
@@ -49,15 +64,19 @@ def _slugify(title: str, fallback: str) -> str:
     return cleaned[:60] if cleaned else fallback
 
 
-def _freeze_paths(docs: list[Document]) -> dict[str, str]:
+def _freeze_paths(docs: list[Document]) -> _LinkIndex:
     """第一遍：为全部 kept 文档分配唯一文件名并冻结 out_relpath。
 
-    返回「引用写法 → 文件名」的映射。同一篇文档可被多种写法引用
-    （标题 / 原文件名 stem / 原相对路径），全部登记；先到先得，不覆盖。
+    同时建两张索引：
+    - `by_alias`：「引用写法 → 文件名」。同一篇文档可被多种写法引用
+      （标题 / 原文件名 stem / 原相对路径），全部登记；先到先得，不覆盖。
+    - `by_path`：「源相对路径 → 文件名」，供标准 Markdown 相对链接按路径解析。
     """
     used_keys: set[str] = set()
     mapping: dict[str, str] = {}
     owners: dict[str, set[str]] = {}    # alias → 拥有它的 doc_id 集合
+    by_path: dict[str, str] = {}
+    path_owners: dict[str, set[str]] = {}
 
     for doc in docs:
         if doc.status != "kept":
@@ -72,6 +91,9 @@ def _freeze_paths(docs: list[Document]) -> dict[str, str]:
         doc.out_relpath = f"knowledge/{name}"
 
         source = Path(doc.source_relpath)
+        path_key = _norm_key(posixpath.normpath(doc.source_relpath))
+        path_owners.setdefault(path_key, set()).add(doc.doc_id)
+        by_path.setdefault(path_key, name)
         # 不登记输出文件名自身：_rewrite_md_links 在 wikilink 转换之前执行，
         # 不存在二次处理，自映射只会让「输出名恰好等于另一篇的标题」时抢占别名。
         for alias in (doc.title, source.stem, source.name, doc.source_relpath):
@@ -89,7 +111,36 @@ def _freeze_paths(docs: list[Document]) -> dict[str, str]:
     for key, doc_ids in owners.items():
         if len(doc_ids) > 1:
             mapping.pop(key, None)
-    return mapping
+    # 源路径本该天然唯一（walk_source 已按文件系统等价键拦过碰撞），这里是兜底：
+    # 真出现两篇归一后同路径时宁可都不解析，也不赌其中一篇。
+    for key, doc_ids in path_owners.items():
+        if len(doc_ids) > 1:
+            by_path.pop(key, None)
+    return _LinkIndex(by_alias=mapping, by_path=by_path)
+
+
+def _resolve_source_path(
+    target: str, source_dir: str, by_path: dict[str, str]
+) -> str | None:
+    """按**路径**语义解析标准 Markdown 相对链接。
+
+    基准是当前文档所在目录，其次是导出根（Obsidian 的「相对 vault 根」
+    设置会把链接写成不带前导斜杠的根相对路径）。两者都是全路径精确匹配。
+
+    **刻意不做 basename/stem 兜底**：`a/linker.md` 里的 `(note.md)` 在
+    Markdown 语义下只可能是 `a/note.md`；仓库里只有 `b/note.md` 时把链接
+    接过去，产出的是「活着的错链」——正文指向一篇不相干的文档，而 manifest
+    显示解析成功。死链有人报，错链没人查，所以宁可降级为纯文本并记账。
+    （wikilink 是名字语义，不受此限，走 `_resolve_target`。）
+    """
+    for base in (source_dir, ""):
+        joined = posixpath.normpath(posixpath.join(base, target))
+        if joined == ".." or joined.startswith("../"):
+            continue                    # 逃出导出根的路径不可能对应任何文档
+        hit = by_path.get(_norm_key(joined))
+        if hit is not None:
+            return hit
+    return None
 
 
 def _resolve_target(target: str, mapping: dict[str, str]) -> str | None:
@@ -105,13 +156,16 @@ def _resolve_target(target: str, mapping: dict[str, str]) -> str | None:
 
 
 def _rewrite_md_links(
-    text: str, mapping: dict[str, str], unresolved: list[str]
+    text: str, index: _LinkIndex, unresolved: list[str], source_dir: str
 ) -> str:
     """重映射**原有的**标准相对链接。
 
     真实导出（尤其 Notion）里的内部链接不是 wikilink，而是形如
     `[标题](Some%20Page%20abc123.md)` 的 URL 编码相对路径。目录被拍平后
     这些路径全部失效——只处理 wikilink 会让真实语料 100% 死链。
+
+    `source_dir` 是当前文档在源树中的目录（POSIX 相对路径，根目录为 ""）。
+    没有它就只能拿 basename 猜，跨目录同名文件必然被接错。
     """
 
     def repl(match: re.Match) -> str:
@@ -122,14 +176,16 @@ def _rewrite_md_links(
         path_part, _, anchor = target.partition("#")
         decoded = unquote(path_part)
         if not decoded.lower().endswith(".md"):
-            return match.group(0)       # 非 .md 目标（图片等）不动
+            # 文件名本身含 `#` 的情形：Notion 允许页面标题以 `#` 开头，导出的
+            # 文件名就带 `#` 且链接里不做 URL 编码。按锚点切完只剩目录部分，
+            # 会让链接原样留下变成死链。先按锚点解释（上面），不成立再把整串
+            # 当路径试一次——顺序不能反，否则 `a.md#b.md` 的锚点会被吞进路径。
+            whole = unquote(target)
+            if not whole.lower().endswith(".md"):
+                return match.group(0)   # 非 .md 目标（图片等）不动
+            decoded, anchor = whole, ""
 
-        candidate = Path(decoded)
-        name = (
-            _resolve_target(decoded, mapping)
-            or _resolve_target(candidate.name, mapping)
-            or _resolve_target(candidate.stem, mapping)
-        )
+        name = _resolve_source_path(decoded, source_dir, index.by_path)
         if name is None:
             unresolved.append(decoded)
             return label                # 不留死链
@@ -141,8 +197,9 @@ def _rewrite_md_links(
 
 def _convert_links(
     body: str,
-    mapping: dict[str, str],
+    index: _LinkIndex,
     unresolved: list[str],
+    source_dir: str,
     keep_wikilinks: bool = False,
 ) -> str:
     def repl(match: re.Match) -> str:
@@ -157,7 +214,7 @@ def _convert_links(
             if not target:
                 return f"[{label}](#{anchor})"  # [[#小节]] 同文件锚点
 
-        name = _resolve_target(target, mapping)
+        name = _resolve_target(target, index.by_alias)
         if name is None:
             # 目标不存在（从未有过，或被判空壳/重复而没有输出文件）。
             # 绝不产生指向不存在文件的链接——退化为纯文本并记账。
@@ -173,7 +230,7 @@ def _convert_links(
         if i % 2 == 0:
             # 顺序要紧：先重映射原有标准链接，再把 wikilink 转成标准链接。
             # 反过来会让刚生成的链接被再处理一次（自映射保证幂等，但多余）。
-            remapped = _rewrite_md_links(part, mapping, unresolved)
+            remapped = _rewrite_md_links(part, index, unresolved, source_dir)
             result.append(
                 remapped if keep_wikilinks else _WIKILINK.sub(repl, remapped)
             )
@@ -209,7 +266,7 @@ def emit(
         )
     knowledge.mkdir(parents=True, exist_ok=True)
 
-    mapping = _freeze_paths(docs)          # 第一遍：冻结全部路径
+    index = _freeze_paths(docs)             # 第一遍：冻结全部路径
     unresolved: list[dict] = []
 
     for doc in docs:                        # 第二遍：改写并落盘
@@ -218,7 +275,13 @@ def emit(
         misses: list[str] = []
         # --wikilinks 只决定「是否保留 [[...]] 方言」，**不能**跳过标准
         # Markdown 链接的重映射——那些链接在目录拍平后同样会失效。
-        body = _convert_links(doc.body, mapping, misses, keep_wikilinks=wikilinks)
+        body = _convert_links(
+            doc.body,
+            index,
+            misses,
+            posixpath.dirname(doc.source_relpath),
+            keep_wikilinks=wikilinks,
+        )
         for miss in misses:
             unresolved.append({"from_doc_id": doc.doc_id, "target": miss})
 
