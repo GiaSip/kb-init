@@ -192,7 +192,7 @@ kb-init ~/notion-export/
 | L1/L2 | 纯本地，无需 key | 免费预览层，秒出，隐私 |
 | L3 | 用户自己的 key | 不是阉割，是隐私与成本的诚实划分 |
 | 语言/分发 | **✅ 已裁决：Python 3.12 + uv（`uvx kb-init`）** | FastEmbed + ONNX 是 R2 最稳方案且原生 Python，没必要为分发便利重造推理层；uv 在缺 Python 时能自动下载。**Node+npx 并无"真零安装"优势——它同样要求预装 Node** |
-| 本地 embedding | **✅ 已裁决：FastEmbed + `BAAI/bge-small-zh-v1.5`**（512 维 / ~90MB / ONNX CPU / 无需 GPU）<br>`model2vec`（potion-multilingual）降为 `--fast` 预览档；`multilingual-e5-small`（471MB + 前缀契约）留作多语言 fallback | 中文原生训练、体积可接受、工程风险最低。⚠️ **C-MTEB 的聚类单项并未压倒 E5，真实笔记聚类仍标"需验证"——不拿排行榜代替验收** |
+| 本地 embedding | **✅ 已裁决并于 2026-08-14 通过真实语料验收：FastEmbed + `BAAI/bge-small-zh-v1.5`**（512 维 / ~90MB / ONNX CPU / 无需 GPU）<br>`model2vec`（potion-multilingual）降为 `--fast` 预览档；多语言 fallback 更正为 `paraphrase-multilingual-MiniLM-L12-v2`（0.22GB，无前缀契约）——~~`multilingual-e5-small`~~ **不在 FastEmbed 支持列表里**，e5 家族只有 2.24GB 的 large 版且前缀需手动加 | 中文原生训练、体积可接受、工程风险最低。验收结论见 R2 |
 | 分块 | **强制**。先分块 embedding 再聚合成文档向量 | bge 上限 512 token，不分块 → 长笔记**静默截断**，benchmark 再好也没意义 |
 | 脱敏 | **双产物** `report.private.html` / `report.share.html`；共享版走**字段 allowlist** | 「默认脱敏 + PII 正则」制造虚假安全感。blocklist 永远补不完，allowlist 一次收敛——与我们在 headless 权限上学到的教训同构 |
 
@@ -210,7 +210,7 @@ kb-init ~/notion-export/
 | # | 项 | 处理 |
 |---|---|---|
 | R1 | ~~"claude-obsidian 没有 X"只来自 README fetch~~ | ✅ **已验证**（2026-08-13，clone 源码逐条核，非 README）见 §2.3 |
-| R2 | 模型已裁决（§7），但**聚类质量仍未验**——C-MTEB 聚类单项 bge 并未压倒 E5 | 在 `Archive/Apple Notes` 上做真实聚类质量验收，**不拿排行榜代替验收** |
+| R2 | ~~模型已裁决（§7），但聚类质量仍未验~~ **✅ 2026-08-14 已验收（见 §13）**：bge 通过，但通过的理由与设想不同——模型不是瓶颈，瓶颈在聚类方法与呈现策略 | 已在 `Archive/Apple Notes` 287 篇上做完三模型 × 两方法对照；探针 `probes/cluster_quality_probe.py` 可复现 |
 | **R14** | **首次运行不是"秒开"**：用户须先有 `uv`，首跑可能下载 Python + 依赖 + ~90MB 模型，按**分钟**计。这与"对不懂的人可见、10 分钟出 aha"的定位直接冲突 | ①宣传语改为"装好 uv 后一条命令运行，无需自己装 Python"，不吹零安装 ②首次运行体验按一等公民设计（进度、预估时间、下载可见）③GitHub Releases 单二进制列入 v0.2 明确路线——**但 v0.1 不同时维护两套实现** |
 | **R15** | **跨平台原生 wheel**（`onnxruntime` 等）是真正的分发风险，不是 uv 本身 | 发布前 CI 必须验 Windows x64 / macOS Intel + Apple Silicon / Linux x64 |
 | R3 | L3 瞎编导致可信度崩塌 | 证据强制挂载（§5）+ 人肉勾选 gate（§4.2），双保险 |
@@ -293,3 +293,29 @@ Codex 全分支终审推翻了 §4 的一个核心假设，记录在此避免重
 `--wikilinks` 由此重新定义：它只改**输出语法**，不跳过解析。目标一律先解析到冻结后的
 输出名（`[[Project A]]` → `[[Project-A|Project A]]`，因为文件实际叫 `Project-A.md`），
 歧义照样降级；只有"没有输出文件的目标"保留 `[[...]]`——那是 Obsidian 合法的未创建链接。
+
+## 13. R2 验收结论（2026-08-14）
+
+在 `Archive/Apple Notes` 清洗后的 287 篇上跑三模型 × 两方法对照。完整报告与簇样本在仓库外
+（含个人语料内容，不进开源仓库）：`~/Documents/assistant-output/kb-init-r2/`。
+
+| 模型 | 体积 | KMeans k=8 silhouette | HDBSCAN(mcs=5) 未归类 |
+|---|---|---|---|
+| **bge-small-zh-v1.5**（裁决保持） | 0.09 GB | **0.091** | 222/287 |
+| jina-embeddings-v2-base-zh | 0.64 GB | 0.083 | 211/287 |
+| paraphrase-multilingual-MiniLM-L12-v2 | 0.22 GB | 0.074 | 198/287 |
+
+**结论：模型不是瓶颈。** 7× 体积换 3 个百分点的未归类率，且 KMeans 分数反而更低；以 R14
+（首次运行下载已是体验风险）衡量，这个交换不成立。silhouette 全部落在 0.07–0.09 彼此拉不开，
+**在这个任务上没有区分力**——验收只能靠人看簇，这正是当初写"不拿排行榜代替验收"的原因。
+
+**真正的发现是聚类方法的分叉**：
+
+- KMeans 强制每篇入簇 → 8–12 个簇里有 4–6 个能一眼认出（学生作业 / 排课 / 意大利语语法 /
+  AI 项目 / 艺术家人物），其余 2–3 个是大杂烩——语料里本来零散的部分被摊进最近的簇。
+- HDBSCAN 允许不归类 → 3 个极干净的主题，代价是 **69–77% 的笔记未归类**（三个模型一致，
+  说明是**语料本身稀疏**，不是模型缺陷）。
+
+这条分叉直接关系 §4.2「Wrapped 是档案的验收界面」：若人要逐条确认洞察，**一条看不出是什么的
+洞察比少一条洞察更伤**——原则倾向 HDBSCAN；但"70% 未归类"需要一个像样的说法（例如讲成
+"碎片区：这些笔记还没长成主题"，本身即是一条洞察）。**留待 Plan 2 拍板。**
