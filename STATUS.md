@@ -6,7 +6,7 @@
 
 **Plan 1 已合并 main**（6 轮 Codex 终审，93 passed，Notion 死链 2/237）。
 **Plan 2 已拆成五个子项目**（2A 索引 → 2B L2 洞察 → 2D compile → 2C Wrapped → 2E L3）。
-**2A 索引层**（165 passed）与 **2B 洞察层**（含前置 2A′，263 passed + 3 smoke）已实现完毕，
+**2A 索引层**（165 passed）与 **2B 洞察层**（含前置 2A′，299 passed + 4 smoke，5 轮 Codex 终审）已实现完毕，
 spec 与计划见 `docs/superpowers/`。
 
 2A 期间两个改变设计的实测发现：
@@ -115,6 +115,14 @@ Notion 导出用的是 URL 编码的标准相对链接而非 wikilink，只处�
 **条件③判为 `not_evaluable`**：它要求"第二份第三方语料"，而手上两份语料同属一位作者。
 不拿第二份自有语料冒充第三方语料来宣布它通过。halo 保持未裁决，
 判定结果随产物落盘在 `insights.json` 的 `revisit_gate` 里。
+
+**Codex 终审 5 轮**（首轮 9 阻断 + 4 必修，全部成立、无一误报）。三条最贵的：
+① 洞察/索引清理失败时 `raise` 会穿到 `run()` 的 finally，把**完好的**清洗产物
+一起删掉——2A 就埋着同一个洞；② `corpus_is_first_party=True` 这个无证据默认值
+让每次运行都自称自有语料、把条件③永久禁用，等于用一个默认值实现了这条 gate
+本来要防的自证；③ 我用「manifest 才是权威」给「留下半份产物」做辩护，却没让
+任何读取入口去问 manifest——那是张空头支票，后来按 Codex 的建议改用
+provisional manifest，把 `trust_manifest=False` 这个逃生门整个删掉。
 
 **关键词命名的人工验收**（呈现级主题）：Notion 10 组里 9 组可辨认，Apple Notes 5 组里 3 组，
 合计 12/15 = 80%，过 70% 线；**但 Apple Notes 单独看是 60%，不达标**——
