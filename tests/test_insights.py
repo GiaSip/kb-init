@@ -119,10 +119,13 @@ def test_corpus_insights_emit_conditions_that_do_hold():
     manifest = _manifest(
         counts={"total": 10, "kept": 6, "dropped_stub": 3, "dropped_duplicate": 1},
         unresolved_links=[{"from_doc_id": "d1", "target": "a.png"},
-                          {"from_doc_id": "d2", "target": "b.md"}])
+                          {"from_doc_id": "d2", "target": "b.md"},
+                          {"from_doc_id": "d3", "target": "6"}])
     out = {i.kind: i for i in build_corpus_insights(manifest, _residual_only_index())}
     assert "exact_duplicates" in out and "broken_refs" in out
-    assert out["broken_refs"].payload["by_kind"] == {"attachment": 1, "document": 1}
+    # 三桶：无扩展名的目标不能被算成「文档」，否则用户会以为丢了那么多篇笔记
+    assert out["broken_refs"].payload["by_kind"] == {
+        "attachment": 1, "document": 1, "other": 1}
     assert "date_blindness" in out             # time_axis.available 为 false
 
 

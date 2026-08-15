@@ -125,14 +125,22 @@ def build_corpus_insights(manifest: dict, index: dict) -> list[Insight]:
 
     links = manifest.get("unresolved_links") or []
     if links:
-        by_kind = {"attachment": 0, "document": 0}
+        # 三桶而不是两桶：实测某份语料的 419 条里只有 63 条是 .md，其余 356 条
+        # 连扩展名都没有（有的就是个「6」）。把它们全算作「文档」不算撒谎，
+        # 但会让用户以为丢了 419 篇笔记。
+        by_kind = {"attachment": 0, "document": 0, "other": 0}
         for link in links:
             target = (link.get("target") or "").lower()
-            key = "attachment" if target.endswith(ATTACHMENT_SUFFIXES) else "document"
-            by_kind[key] += 1
+            if target.endswith(ATTACHMENT_SUFFIXES):
+                by_kind["attachment"] += 1
+            elif target.endswith(".md"):
+                by_kind["document"] += 1
+            else:
+                by_kind["other"] += 1
         add("broken_refs", {"total": len(links), "by_kind": by_kind},
             f"有 {len(links)} 处引用指向不存在的目标"
-            f"（附件 {by_kind['attachment']} / 文档 {by_kind['document']}）",
+            f"（附件 {by_kind['attachment']} / 文档 {by_kind['document']}"
+            f" / 认不出是什么 {by_kind['other']}）",
             {"total": len(links)})
 
     if counts["dropped_duplicate"]:

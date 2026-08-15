@@ -77,3 +77,127 @@ def test_notion_index_time_axis_unavailable(tmp_path):
     assert index["corpus_hash"] == json.loads(
         (out / "manifest.json").read_text(encoding="utf-8")
     )["corpus_hash"]
+
+
+# ---------------- 2B 洞察层验收 ----------------
+
+def _notion_export_dir():
+    if not NOTION.is_dir():
+        return None
+    for child in sorted(NOTION.iterdir()):
+        if child.is_dir() and child.name.startswith("Export-"):
+            return child
+    return NOTION
+
+
+@pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
+def test_real_insights_md_round_trips(tmp_path):
+    """合成语料测不出真实形态——真实标题里有 emoji、换行、markdown 字符，
+    渲染出来必须仍然能被自己的解析器逐条读回去。
+
+    用 FakeEmbedder：这条测的是**格式**在真实文本上的鲁棒性，与向量质量无关。
+    """
+    import json
+
+    from kb_init.insights_md import parse_markdown, validate_markdown
+    from tests.fakes import FakeEmbedder
+
+    out = tmp_path / "out"
+    summary = run(APPLE, out, run_id="acceptance-md", embedder=FakeEmbedder(dim=16))
+    assert summary["insights_status"] == "complete"
+
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    md = (out / "insights.md").read_text(encoding="utf-8")
+    validate_markdown(md, payload)
+    parsed = parse_markdown(md)
+    assert parsed["selections"], "清单为空会让下面的断言恒真"
+    assert set(parsed["selections"]) == {i["insight_id"] for i in payload["insights"]}
+    assert all(parsed["selections"].values())
+
+
+@pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
+def test_real_insight_set_is_internally_consistent(tmp_path):
+    import json
+
+    from tests.fakes import FakeEmbedder
+
+    out = tmp_path / "out"
+    run(APPLE, out, run_id="acceptance-consistency", embedder=FakeEmbedder(dim=16))
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+
+    assert payload["counts"]["total"] == len(payload["insights"])
+    assert payload["corpus_hash"] == manifest["corpus_hash"]
+    ids = [i["insight_id"] for i in payload["insights"]]
+    assert len(set(ids)) == len(ids)
+    # 每条 topic 洞察的证据必须真的属于它那个 group，且非空
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    from kb_init.insights import group_members
+    topics = [i for i in payload["insights"] if i["family"] == "topic"]
+    for item in topics:
+        ref = (item["payload"]["group_ref"]["analysis_id"],
+               item["payload"]["group_ref"]["group_id"])
+        members = set(group_members(index, ref))
+        assert item["payload"]["evidence_doc_ids"], item["insight_id"]
+        assert set(item["payload"]["evidence_doc_ids"]) <= members
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
+def test_apple_notes_has_no_flagged_group(tmp_path):
+    """选择性验证（负例）：检测器不能把好簇也标记掉。
+
+    Apple Notes 上 5 个簇的内聚度提升量都在 +0.20 附近，远高于 0.12，
+    因此不该产生任何子分析——2A′ 在这份语料上是零改动。
+    """
+    import json
+
+    out = tmp_path / "out"
+    run(APPLE, out, run_id="acceptance-apple-2b")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert len(index["analyses"]) == 1, "Apple Notes 上不应有任何 group 被细分"
+
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    assert payload["counts"]["topic"] == 5
+    assert 8 <= payload["counts"]["total"] <= 14
+    gate = {c["id"]: c for c in payload["revisit_gate"]["conditions"]}
+    assert gate["residual_high"]["state"] == "not_evaluable"
+    assert gate["insufficient_topics"]["state"] == "not_triggered"
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(_notion_export_dir() is None, reason="Notion 语料不在本机")
+def test_notion_blob_is_subdivided_into_many_topics(tmp_path):
+    """正例：那个 509 篇、内聚度只比未分类堆高 0.069 的巨簇必须被细分。"""
+    import json
+
+    out = tmp_path / "out"
+    run(_notion_export_dir(), out, run_id="acceptance-notion-2b")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert len(index["analyses"]) == 2, "巨簇必须被标记并细分"
+    child = index["analyses"][1]
+    assert child["input_scope"]["kind"] == "parent_group"
+    assert child["method"]["params"]["cluster_selection_method"] == "leaf"
+
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    assert payload["counts"]["topic"] >= 8, "细分后主题数应远多于原来的 2 个"
+    gate = {c["id"]: c for c in payload["revisit_gate"]["conditions"]}
+    assert gate["topics_concentrated"]["state"] == "not_triggered"
+    assert gate["insufficient_topics"]["state"] == "not_triggered"
+    assert gate["residual_high"]["state"] == "not_evaluable"
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
+def test_real_topic_keywords_are_never_empty(tmp_path):
+    """反恒真：只断言「证据 ⊆ 成员」时，关键词全空也能全绿。"""
+    import json
+
+    out = tmp_path / "out"
+    run(APPLE, out, run_id="acceptance-apple-kw")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    topics = [i for i in payload["insights"] if i["family"] == "topic"]
+    assert topics
+    for item in topics:
+        assert item["payload"]["keywords"], item["insight_id"]
+        assert len(item["payload"]["evidence_doc_ids"]) == 3
