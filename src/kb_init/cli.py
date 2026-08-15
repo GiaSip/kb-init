@@ -40,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     from kb_init.pipeline import run
 
     # 退出码合同（见 README）：0 成功 / 1 输出冲突 / 2 用法错误
-    # / 3 输入不安全或损坏 / 4 I-O 失败 / 5 产物已发布但索引未完成。
+    # / 3 输入不安全或损坏 / 4 I-O 失败 / 5 产物已发布但索引未完成
+    # / 6 索引完成但洞察层未生成 / 7 validate 判定 insights.md 不合法。
     # 默认不向普通用户吐 traceback。
     try:
         counts = run(
@@ -81,6 +82,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 5
+    # 6 与 5 的恢复动作不同：5 要重跑索引（需要网络与模型），6 只差洞察层。
+    # 拓宽 5 的语义会让脚本在只需重算洞察时错误地重跑整个索引。
+    if counts.get("insights_status") == "failed":
+        print(
+            f"警告：清洗产物与索引已写入，但洞察未生成"
+            f"（{counts.get('insights_reason')}）。",
+            file=sys.stderr,
+        )
+        return 6
     return 0
 
 

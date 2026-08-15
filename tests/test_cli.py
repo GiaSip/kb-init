@@ -29,3 +29,38 @@ def test_corrupt_zip_gives_clean_error(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 3
     assert "Traceback" not in err
+
+
+def _fake_summary(**over):
+    base = {"total": 10, "kept": 6, "dropped_stub": 4, "dropped_duplicate": 0,
+            "index_status": "complete", "index_reason": None,
+            "insights_status": "complete", "insights_reason": None}
+    base.update(over)
+    return base
+
+
+def test_exit_code_6_when_only_insights_failed(tmp_path, monkeypatch, capsys):
+    from kb_init.cli import main
+
+    monkeypatch.setattr("kb_init.pipeline.run",
+                        lambda *a, **k: _fake_summary(insights_status="failed",
+                                                      insights_reason="naming_failed"))
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 6
+    assert "洞察" in capsys.readouterr().err
+
+
+def test_exit_code_5_still_wins_when_index_failed(tmp_path, monkeypatch):
+    from kb_init.cli import main
+
+    monkeypatch.setattr("kb_init.pipeline.run",
+                        lambda *a, **k: _fake_summary(
+                            index_status="failed", index_reason="model_unavailable",
+                            insights_status="skipped", insights_reason="index_failed"))
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 5
+
+
+def test_exit_code_0_when_everything_completes(tmp_path, monkeypatch):
+    from kb_init.cli import main
+
+    monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: _fake_summary())
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 0

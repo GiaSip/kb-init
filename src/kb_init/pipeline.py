@@ -96,6 +96,77 @@ def _versions(embedder=None) -> dict:
     }
 
 
+_INSIGHTS_FAILURE_REASONS = (
+    (ImportError, "runtime_unavailable"),
+    (OSError, "io_failed"),
+    (ValueError, "contract_violation"),
+)
+
+
+def _classify_insights_failure(exc: Exception) -> str:
+    """与 `_classify_index_failure` 同一条纪律：**必须是全函数**，任何输入都只
+    返回枚举值。它跑在 except 分支里，自己抛出就会把已发布的产物一起带走。"""
+    for exc_type, reason in _INSIGHTS_FAILURE_REASONS:
+        if isinstance(exc, exc_type):
+            return reason
+    return "naming_failed"
+
+
+def _run_insights_stage(
+    staging: Path,
+    docs: list,
+    *,
+    counts: dict,
+    unresolved_links: list,
+    index_status: str,
+) -> tuple[str, str | None]:
+    """洞察阶段。失败必须在这里被吸收成状态——理由与索引阶段完全相同：
+    rename 之前传播出去的任何异常都会让 finally 删掉 staging，清洗产物一并消失。
+
+    **不读 manifest**：本阶段跑在 `write_manifest` 之前，manifest 还没落盘。
+    需要的计数与断链由调用方把已经算好的值传进来。
+    """
+    if index_status == "skipped":
+        return "skipped", "no_index"
+    if index_status != "complete":
+        return "skipped", "index_failed"
+
+    try:
+        from kb_init.index import read_index
+        from kb_init.insights import (
+            build_insight_set,
+            cleanup_insight_files,
+            insight_files_remain,
+            write_insights,
+        )
+        from kb_init.insights_md import render_markdown
+
+        # 写盘后**读回**，走公共读取器：这条路径能抓到序列化、映射与版本边界上的
+        # 问题，而 2C/2D/2E 走的正是这条路。只测内存路径的话，三个下游第一次
+        # 读文件时才会发现合同没兑现。
+        index, _matrix = read_index(staging)
+        kept = [d for d in docs if d.status == "kept"]
+        payload = build_insight_set(
+            index,
+            {"counts": counts, "unresolved_links": unresolved_links, "documents": []},
+            {d.doc_id: d.body for d in kept},
+            {d.doc_id: (d.title or "") for d in kept},
+        )
+        write_insights(staging, payload, render_markdown(payload))
+        return "complete", None
+    except Exception as exc:
+        reason = _classify_insights_failure(exc)
+        try:
+            from kb_init.insights import cleanup_insight_files, insight_files_remain
+
+            cleanup_insight_files(staging)
+            if insight_files_remain(staging):
+                raise OSError("洞察半成品无法清除")
+        except ImportError:
+            pass
+        return "failed", reason
+
+
 def _subdivide_flagged_groups(
     doc_ids, matrix, assignments, method_dict, build_analysis, build_time_axis
 ) -> list[dict]:
@@ -397,6 +468,13 @@ def run(
                 run_id=run_id, corpus_hash=corpus_hash,
             )
 
+        insights_status, insights_reason = _run_insights_stage(
+            staging, docs,
+            counts=summarize(docs),
+            unresolved_links=result.unresolved_links,
+            index_status=index_status,
+        )
+
         write_manifest(
             docs,
             staging,
@@ -406,6 +484,8 @@ def run(
             skipped_inputs=collisions,
             index_status=index_status,
             index_reason=index_reason,
+            insights_status=insights_status,
+            insights_reason=insights_reason,
         )
 
         # 返回值在 commit **之前**算好。放在 rename 之后算，一旦 summarize 抛错
@@ -413,6 +493,8 @@ def run(
         summary = summarize(docs)
         summary["index_status"] = index_status
         summary["index_reason"] = index_reason
+        summary["insights_status"] = insights_status
+        summary["insights_reason"] = insights_reason
 
         # 临时目录在 commit 前严格清掉：放到 return 时清理，一旦清理失败就会在
         # 产物已发布之后抛异常，制造"命令报错但产物已发布"；而删不干净又照常发布，

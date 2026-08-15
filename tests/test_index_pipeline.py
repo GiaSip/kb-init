@@ -420,3 +420,92 @@ def test_subdivision_failure_rolls_back_the_whole_index(tmp_path, monkeypatch):
     assert not (out / "index.json").exists()
     assert not (out / "index-vectors.npy").exists()
     assert (out / "knowledge").is_dir()              # 清洗产物必须还在
+
+
+# ---------------- 2B：洞察阶段接线 ----------------
+
+def test_insights_are_published_alongside_the_index(tmp_path):
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["insights_status"] == "complete"
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    assert payload["run_id"] == "t"
+    assert payload["counts"]["total"] == len(payload["insights"])
+    assert payload["counts"]["topic"] >= 2
+    assert (out / "insights.md").exists()
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "complete"
+    assert manifest["insights_reason"] is None
+
+
+def test_insights_md_validates_against_its_own_json(tmp_path):
+    from kb_init.insights_md import validate_markdown
+
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    validate_markdown((out / "insights.md").read_text(encoding="utf-8"), payload)
+
+
+def test_insights_bind_to_the_same_corpus_hash_as_the_manifest(tmp_path):
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert payload["corpus_hash"] == manifest["corpus_hash"]
+
+
+def test_no_index_skips_insights(tmp_path):
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, no_index=True)
+    assert summary["insights_status"] == "skipped"
+    assert summary["insights_reason"] == "no_index"
+    assert not (out / "insights.json").exists()
+    assert not (out / "insights.md").exists()
+
+
+def test_index_failure_skips_insights(tmp_path):
+    from tests.fakes import BrokenEmbedder
+
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BrokenEmbedder("nan"), run_id="t")
+    assert summary["index_status"] == "failed"
+    assert summary["insights_status"] == "skipped"
+    assert summary["insights_reason"] == "index_failed"
+    assert (out / "knowledge").is_dir()
+
+
+def test_insights_failure_keeps_the_index_and_marks_status(tmp_path, monkeypatch):
+    import kb_init.insights as mod
+
+    monkeypatch.setattr(mod, "build_insight_set",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["index_status"] == "complete"
+    assert summary["insights_status"] == "failed"
+    assert summary["insights_reason"] == "naming_failed"
+    assert (out / "index.json").exists()
+    assert not (out / "insights.json").exists()
+    assert not (out / "insights.md").exists()
+
+
+def test_half_written_insights_are_rolled_back(tmp_path, monkeypatch):
+    """写 json 成功、写 md 失败 → 两个都不能留下。"""
+    from pathlib import Path as _P
+
+    real = _P.write_text
+
+    def explode(self, *a, **k):
+        if self.name == "insights.md":
+            raise OSError("写 md 失败")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(_P, "write_text", explode)
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    monkeypatch.undo()
+    assert summary["insights_status"] == "failed"
+    assert not (out / "insights.json").exists()
+    assert not (out / "insights.md").exists()
+    assert (out / "index.json").exists()
