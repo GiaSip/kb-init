@@ -465,3 +465,20 @@ def test_length_profile_reports_the_distribution_without_a_magic_threshold():
 def test_length_profile_absent_when_there_are_no_bodies():
     kinds = {i.kind for i in build_corpus_insights(_manifest(), _residual_only_index())}
     assert "length_profile" not in kinds
+
+
+def test_unknown_provenance_value_is_rejected():
+    """拼错的值会落进「非 third_party」分支被当成自有语料，同时原样写进 inputs
+    ——产物于是自相矛盾：它声称的来源不是判定用的那个。"""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="corpus_provenance"):
+        build_revisit_gate(5, 5, 0.5, corpus_provenance="thirdparty")
+
+
+def test_length_profile_median_is_correct_for_even_samples():
+    """偶数样本取上中位数会把 [100, 200] 报成 200。"""
+    bodies = {"a": "x" * 100, "b": "x" * 200}
+    got = {i.kind: i for i in
+           build_corpus_insights(_manifest(), _residual_only_index(), bodies)}
+    assert got["length_profile"].payload["median_chars"] == 150

@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass, field
 
 GroupRef = tuple[str, str]
@@ -146,7 +147,8 @@ def build_corpus_insights(
     if lengths:
         # 不设「不足 N 字」这类阈值：清洗已经把 <200 字的判为空壳，kept 里数它
         # 只会得到一个恒为 0 的数字。只报分布本身。
-        median = lengths[len(lengths) // 2]
+        # 偶数样本取上中位数会让 [100, 200] 报成 200。用 statistics.median。
+        median = int(statistics.median(lengths))
         add("length_profile",
             {"count": len(lengths), "median_chars": median,
              "shortest_chars": lengths[0], "longest_chars": lengths[-1]},
@@ -353,6 +355,7 @@ INSUFFICIENT_TOPICS_THRESHOLD = 4
 TOPICS_CONCENTRATED_THRESHOLD = 2
 RESIDUAL_HIGH_THRESHOLD = 0.70
 INSIGHT_FILES = ("insights.json", "insights.md")
+CORPUS_PROVENANCE = ("unknown", "first_party", "third_party")
 
 
 def build_revisit_gate(
@@ -375,6 +378,13 @@ def build_revisit_gate(
     会把数量填满，①永远为假——这个项目已经有三轮「留一条兜底路径，规则就被
     它绕过」的事故史。
     """
+    if corpus_provenance not in CORPUS_PROVENANCE:
+        # 拼错的值会落进「非 third_party」分支被当成自有语料，同时原样写进
+        # inputs——产物于是自相矛盾：它声称的来源根本不是判定用的那个。
+        raise ValueError(
+            f"corpus_provenance 只能是 {CORPUS_PROVENANCE} 之一，得到 {corpus_provenance!r}"
+        )
+
     def cond(cid, threshold, observed, triggered, prescription, not_evaluable=None):
         item = {"id": cid, "threshold": threshold, "observed": observed,
                 "state": "triggered" if triggered else "not_triggered",

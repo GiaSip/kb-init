@@ -343,11 +343,21 @@ def _minimal_index():
                        versions={}, vector_doc_ids=["d1", "d2"])
 
 
+def _publish(tmp_path, matrix=None, index_status="complete"):
+    """写出一份「已发布」形态的产物：索引 + 一份说它算数的 manifest。"""
+    import json as _json
+
+    write_index(tmp_path, _minimal_index(),
+                np.eye(2, 3, dtype=np.float32) if matrix is None else matrix)
+    (tmp_path / "manifest.json").write_text(
+        _json.dumps({"index_status": index_status, "index_reason": None}),
+        encoding="utf-8")
+
+
 def test_read_index_round_trips(tmp_path):
     from kb_init.index import read_index
 
-    index = _minimal_index()
-    write_index(tmp_path, index, np.eye(2, 3, dtype=np.float32))
+    _publish(tmp_path)
     got_index, got_matrix = read_index(tmp_path)
     assert got_index["run_id"] == "r"
     assert got_matrix.shape == (2, 3)
@@ -357,7 +367,7 @@ def test_read_index_round_trips(tmp_path):
 def test_read_index_rejects_row_count_mismatch(tmp_path):
     from kb_init.index import read_index
 
-    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    _publish(tmp_path)
     np.save(tmp_path / "index-vectors.npy", np.eye(5, 3, dtype=np.float32))
     with pytest.raises(ValueError, match="行数"):
         read_index(tmp_path)
@@ -366,7 +376,7 @@ def test_read_index_rejects_row_count_mismatch(tmp_path):
 def test_read_index_rejects_non_finite(tmp_path):
     from kb_init.index import read_index
 
-    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    _publish(tmp_path)
     bad = np.eye(2, 3, dtype=np.float32)
     bad[0, 0] = np.nan
     np.save(tmp_path / "index-vectors.npy", bad)
@@ -377,7 +387,7 @@ def test_read_index_rejects_non_finite(tmp_path):
 def test_read_index_rejects_wrong_dtype(tmp_path):
     from kb_init.index import read_index
 
-    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    _publish(tmp_path)
     np.save(tmp_path / "index-vectors.npy", np.eye(2, 3, dtype=np.float64))
     with pytest.raises(ValueError, match="float32"):
         read_index(tmp_path)
@@ -460,3 +470,36 @@ def test_same_parent_group_cannot_be_subdivided_twice():
                         versions={}, vector_doc_ids=[], extra_analyses=kids)
     with pytest.raises(ValueError, match="两次"):
         validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_read_index_refuses_when_manifest_says_index_is_not_complete(tmp_path):
+    """「半产物由 manifest 兜住」只有在读取入口真的去问 manifest 时才成立，
+    否则那句辩护就是一张空头支票。"""
+    import json as _json
+
+    from kb_init.index import read_index
+
+    _publish(tmp_path, index_status="failed")
+    with pytest.raises(ValueError, match="complete"):
+        read_index(tmp_path)
+    # 管线内部（manifest 尚未写出）是唯一合法例外
+    index, matrix = read_index(tmp_path, trust_manifest=False)
+    assert index["run_id"] == "r"
+
+
+def test_read_index_accepts_a_complete_run(tmp_path):
+    import json as _json
+
+    from kb_init.index import read_index
+
+    _publish(tmp_path)
+    index, _ = read_index(tmp_path)
+    assert index["run_id"] == "r"
+
+
+def test_read_index_without_a_manifest_fails_closed_with_a_clear_message(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    with pytest.raises(ValueError, match="manifest"):
+        read_index(tmp_path)

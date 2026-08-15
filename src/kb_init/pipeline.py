@@ -145,7 +145,8 @@ def _run_insights_stage(
         # 写盘后**读回**，走公共读取器：这条路径能抓到序列化、映射与版本边界上的
         # 问题，而 2C/2D/2E 走的正是这条路。只测内存路径的话，三个下游第一次
         # 读文件时才会发现合同没兑现。
-        index, _matrix = read_index(staging)
+        # 唯一合法的 trust_manifest=False：本阶段跑在 write_manifest 之前
+        index, _matrix = read_index(staging, trust_manifest=False)
         kept = [d for d in docs if d.status == "kept"]
         payload = build_insight_set(
             index,

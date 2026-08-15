@@ -174,3 +174,28 @@ def test_corpus_provenance_flag_reaches_the_gate(tmp_path):
     assert gate["inputs"]["corpus_provenance"] == "third_party"
     states = {c["id"]: c["state"] for c in gate["conditions"]}
     assert states["residual_high"] != "not_evaluable"
+
+
+def test_validate_refuses_when_manifest_says_insights_failed(tmp_path, capsys):
+    import json
+
+    from kb_init.cli import main
+
+    _write_pair(tmp_path)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"insights_status": "failed", "insights_reason": "io_failed"}),
+        encoding="utf-8")
+    assert main(["validate", str(tmp_path / "insights.md")]) == 7
+    assert "complete" in capsys.readouterr().err
+
+
+def test_validate_accepts_when_manifest_says_complete(tmp_path):
+    import json
+
+    from kb_init.cli import main
+
+    _write_pair(tmp_path)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({"insights_status": "complete", "insights_reason": None}),
+        encoding="utf-8")
+    assert main(["validate", str(tmp_path / "insights.md")]) == 0

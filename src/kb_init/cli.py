@@ -54,6 +54,21 @@ def _validate_command(md_path: str) -> int:
         print(f"错误：同目录下找不到 insights.json（{json_path}）。"
               f"校验需要两份文件配对。", file=sys.stderr)
         return 7
+    # 先问 manifest 这两份洞察文件算不算数。清理失败时我们刻意把半份产物留在
+    # 盘上（为了不牵连完好的清洗产物），那笔账记在 manifest 里——
+    # 读取入口不去问，这条兜底就形同虚设。
+    manifest_path = md.with_name("manifest.json")
+    if manifest_path.exists():
+        try:
+            status = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            ).get("insights_status")
+        except (OSError, ValueError):
+            status = None
+        if status is not None and status != "complete":
+            print(f"错误：manifest 说这次运行的洞察状态是 {status!r}，不是 complete"
+                  f"——这两份文件可能是残留或半成品，拒绝校验。", file=sys.stderr)
+            return 7
     try:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
         validate_markdown(md.read_text(encoding="utf-8"), payload)
