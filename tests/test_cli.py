@@ -226,3 +226,14 @@ def test_validate_refuses_when_the_status_field_is_absent(tmp_path):
     (tmp_path / "manifest.json").write_text(json.dumps({"run_id": "r1"}),
                                             encoding="utf-8")
     assert main(["validate", str(tmp_path / "insights.md")]) == 7
+
+
+def test_validate_refuses_when_manifest_top_level_is_not_an_object(tmp_path):
+    """合法 JSON 但顶层是数组/null/字符串时，下标会抛 TypeError——
+    read_index 那边已经捕了，这里不能漏，否则同一种输入两个入口两种行为。"""
+    from kb_init.cli import main
+
+    for payload in ("[]", "null", '"just a string"'):
+        _write_pair(tmp_path, insights_status=None)
+        (tmp_path / "manifest.json").write_text(payload, encoding="utf-8")
+        assert main(["validate", str(tmp_path / "insights.md")]) == 7, payload

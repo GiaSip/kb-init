@@ -62,8 +62,9 @@ def _validate_command(md_path: str) -> int:
         status = json.loads(
             manifest_path.read_text(encoding="utf-8")
         )["insights_status"]
-    except (OSError, ValueError, KeyError) as exc:
-        # 缺失 / 损坏 / 没这个字段，三种都拒绝，不「读不到就跳过」。
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # 缺失 / 损坏 / 没这个字段 / 顶层不是对象（`[]`、`null`、字符串——
+        # 下标会抛 TypeError），四种都拒绝，不「读不到就跳过」。
         # read_index 那边已经是拒读，这里放行就等于两个入口两套标准——
         # 而只要留一条兜底路径，规则就会被它绕过。
         print(f"错误：读不到 {manifest_path} 里的 insights_status（{exc}），"
