@@ -30,6 +30,8 @@ def write_manifest(
     source: str,
     unresolved_links: list[dict] | None = None,
     skipped_inputs: list[dict] | None = None,
+    index_status: str = "skipped",
+    index_reason: str | None = None,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -42,6 +44,10 @@ def write_manifest(
         "counts": summarize(docs),
         "unresolved_links": unresolved_links or [],
         "skipped_inputs": skipped_inputs or [],
+        # 只看「有没有 index.json」分不清 skipped / failed / 旧版本产物，
+        # 事后诊断不能只靠 stderr 和退出码。
+        "index_status": index_status,
+        "index_reason": index_reason,
         "documents": [
             {
                 "doc_id": d.doc_id,

@@ -17,8 +17,98 @@ from kb_init.clean import mark, summarize
 from kb_init.dates import resolve_date
 from kb_init.emit import emit
 from kb_init.extract import safe_extract, walk_source
-from kb_init.manifest import write_manifest
+from kb_init.manifest import compute_corpus_hash, write_manifest
 from kb_init.parse import parse_file
+
+
+def _run_index_stage(
+    staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str
+) -> tuple[str, str | None]:
+    """在 staging 内构建索引，返回 (status, reason)。
+
+    **失败必须在这里被吸收成状态。** run() 的 ExitStack 注册了
+    `published or rmtree(staging)`：任何在 rename 之前传播出去的异常都会连清洗产物
+    一起删掉——那样 CLI 再返回退出码 5 就是在撒谎，因为产物根本不存在。
+
+    只接 `Exception`：`KeyboardInterrupt` / `SystemExit` 是 BaseException，必须透传，
+    不能被伪装成"部分成功"。
+    """
+    from kb_init import __version__
+    from kb_init.chunk import chunk_documents
+    from kb_init.cluster import Assignment, cluster_documents
+    from kb_init.embed import pool_chunk_vectors
+    from kb_init.index import build_index, build_time_axis, validate_index, write_index
+
+    kept = [d for d in docs if d.status == "kept"]
+    if not kept:
+        return "complete", None
+
+    try:
+        if splitter is None:
+            from kb_init.embed import build_splitter
+
+            splitter, splitter_meta = build_splitter()
+        else:
+            splitter_meta = {"name": "injected", "max_tokens": 512, "fallback_used": False}
+
+        if embedder is None:
+            from kb_init.embed import DEFAULT_MODEL, FastEmbedEmbedder
+
+            embedder = FastEmbedEmbedder()
+            model_name = DEFAULT_MODEL
+        else:
+            model_name = getattr(embedder, "model_name", "injected")
+
+        bodies = {d.doc_id: d.body for d in kept}
+        chunks = chunk_documents([(d.doc_id, d.body) for d in kept], splitter)
+        vectors = list(embedder.embed([bodies[c.doc_id][c.start:c.end] for c in chunks]))
+        doc_ids, matrix = pool_chunk_vectors(chunks, vectors)
+
+        groups, assignments = cluster_documents(doc_ids, matrix)
+
+        # 切不出块的文档（正文为空白）拿不到向量，必须显式补一条 residual，
+        # 否则「每个 kept doc 恰有一条 assignment」这条合同会被悄悄破坏。
+        missing = sorted({d.doc_id for d in kept} - set(doc_ids))
+        assignments = list(assignments) + [
+            Assignment(d, "residual", (), "empty_document") for d in missing
+        ]
+
+        dated = sum(1 for d in kept if d.date_source not in ("unknown", "unresolved"))
+        index = build_index(
+            run_id=run_id,
+            corpus_hash=corpus_hash,
+            chunks=chunks,
+            groups=groups,
+            assignments=assignments,
+            method={
+                "family": "density",
+                "name": "hdbscan",
+                "model": model_name,
+                "model_revision": getattr(embedder, "revision", ""),
+                "params": {
+                    "min_cluster_size": 5,
+                    "min_samples": 5,
+                    "metric": "euclidean",
+                },
+                "seed": 0,
+                "splitter": splitter_meta,
+                "pooling": "mean_l2",
+                "score_kind": "density_membership",
+                "score_direction": "higher_better",
+                "decision_threshold": None,
+            },
+            time_axis=build_time_axis(dated, len(kept)),
+            versions={"kb_init": __version__},
+        )
+        validate_index(index, [d.doc_id for d in kept])
+        write_index(staging, index, matrix)
+        return "complete", None
+    except Exception as exc:
+        from kb_init.index import INDEX_FILES
+
+        for name in INDEX_FILES:
+            (staging / name).unlink(missing_ok=True)
+        return "failed", type(exc).__name__
 
 
 def run(
@@ -26,6 +116,9 @@ def run(
     out_dir: Path,
     wikilinks: bool = False,
     run_id: str | None = None,
+    no_index: bool = False,
+    embedder=None,
+    splitter=None,
 ) -> dict:
     source = Path(source)
     out_dir = Path(out_dir)
@@ -85,6 +178,16 @@ def run(
         )
 
         result = emit(docs, staging, wikilinks=wikilinks)
+
+        corpus_hash = compute_corpus_hash(docs)
+        if no_index:
+            index_status, index_reason = "skipped", None
+        else:
+            index_status, index_reason = _run_index_stage(
+                staging, docs, embedder, splitter,
+                run_id=run_id, corpus_hash=corpus_hash,
+            )
+
         write_manifest(
             docs,
             staging,
@@ -92,6 +195,8 @@ def run(
             source=str(source),
             unresolved_links=result.unresolved_links,
             skipped_inputs=collisions,
+            index_status=index_status,
+            index_reason=index_reason,
         )
 
         # 发布：一次 rename。out_dir 若已存在（空目录）先移走，
@@ -101,4 +206,9 @@ def run(
         staging.rename(out_dir)         # ← commit 点，此后不做任何可能失败的事
         published = True
 
-        return summarize(docs)
+        # commit 点之后只做纯计算：把索引状态并进返回值，由调用方映射退出码。
+        # 绝不在这里 raise——那会造成"命令报错但产物已发布"。
+        summary = summarize(docs)
+        summary["index_status"] = index_status
+        summary["index_reason"] = index_reason
+        return summary

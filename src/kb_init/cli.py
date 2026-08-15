@@ -16,6 +16,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="输出 [[wikilink]] 方言（默认输出标准相对路径链接）",
     )
+    parser.add_argument(
+        "--no-index",
+        action="store_true",
+        help="跳过索引：不下载模型、不联网，几秒拿到清洗产物",
+    )
     parser.add_argument("source", nargs="?", help="导出文件夹或 zip 路径")
     parser.add_argument("-o", "--out", default="kb-out", help="输出目录（默认 kb-out）")
     return parser
@@ -35,9 +40,15 @@ def main(argv: list[str] | None = None) -> int:
     from kb_init.pipeline import run
 
     # 退出码合同（见 README）：0 成功 / 1 输出冲突 / 2 用法错误
-    # / 3 输入不安全或损坏 / 4 I-O 失败。默认不向普通用户吐 traceback。
+    # / 3 输入不安全或损坏 / 4 I-O 失败 / 5 产物已发布但索引未完成。
+    # 默认不向普通用户吐 traceback。
     try:
-        counts = run(args.source, args.out, wikilinks=args.wikilinks)
+        counts = run(
+            args.source,
+            args.out,
+            wikilinks=args.wikilinks,
+            no_index=args.no_index,
+        )
     except FileExistsError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
@@ -61,6 +72,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"读入 {total} 篇，保留 {kept} 篇（留存 {kept / total:.0%}）" if total else "未找到 .md 文件")
     print(f"  空壳丢弃 {counts['dropped_stub']} 篇 / 重复丢弃 {counts['dropped_duplicate']} 篇")
     print(f"输出目录：{args.out}")
+    # 索引失败不是整体失败：清洗产物已经发布，用户拿得到。用独立退出码让脚本
+    # 能区分"什么都没有"和"东西在、只差索引"。
+    if counts.get("index_status") == "failed":
+        print(
+            f"警告：清洗产物已写入，但索引未完成（{counts.get('index_reason')}）。"
+            f"换一个 --out 目录重跑即可补上。",
+            file=sys.stderr,
+        )
+        return 5
     return 0
 
 
