@@ -12,7 +12,7 @@ APPLE = Path(os.path.expanduser("~/Documents/Obsidian Vault/Archive/Apple Notes"
 
 @pytest.mark.skipif(not NOTION.exists(), reason="Notion 语料不在本机")
 def test_notion_export_drops_majority_as_stubs(tmp_path):
-    counts = run(NOTION, tmp_path / "out", run_id="acceptance-notion")
+    counts = run(NOTION, tmp_path / "out", run_id="acceptance-notion", no_index=True)
     assert counts["total"] > 1500
     stub_ratio = counts["dropped_stub"] / counts["total"]
     assert stub_ratio > 0.45, f"空壳率 {stub_ratio:.0%}，实测基线约 60%"
@@ -20,7 +20,7 @@ def test_notion_export_drops_majority_as_stubs(tmp_path):
 
 @pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
 def test_apple_notes_retention_near_baseline(tmp_path):
-    counts = run(APPLE, tmp_path / "out", run_id="acceptance-apple")
+    counts = run(APPLE, tmp_path / "out", run_id="acceptance-apple", no_index=True)
     assert counts["total"] > 500
     retention = counts["kept"] / counts["total"]
     assert 0.25 < retention < 0.75, f"留存率 {retention:.0%}，历史人工基线 39%"
@@ -46,9 +46,34 @@ def test_no_unknown_date_explosion(tmp_path):
     """
     import json
     out = tmp_path / "out"
-    run(APPLE, out, run_id="acceptance-dates")
+    run(APPLE, out, run_id="acceptance-dates", no_index=True)
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     docs = manifest["documents"]
     assert len(docs) > 0, "语料为空，无法校验"
     unknown = sum(1 for d in docs if d["date_source"] == "unknown")
     assert unknown / len(docs) < 0.98, "降级链五级全落空，说明实现有问题"
+
+
+@pytest.mark.skipif(not NOTION.exists(), reason="Notion 语料不在本机")
+def test_notion_index_time_axis_unavailable(tmp_path):
+    """真实导出语料上时间轴必须自动降级——这是条件门的验收。
+
+    用 FakeEmbedder 而非真模型：这条测的是「日期覆盖率低于阈值时时间轴关闭」
+    与「coverage 自洽」，与向量质量无关。簇质量的人工验收走 probes/。
+    """
+    import json
+
+    from tests.fakes import FakeEmbedder
+
+    out = tmp_path / "out"
+    counts = run(NOTION, out, run_id="acceptance-index", embedder=FakeEmbedder(dim=16))
+    assert counts["index_status"] == "complete"
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    analysis = index["analyses"][0]
+    ta = analysis["time_axis"]
+    assert ta["available"] is False, f"日期覆盖率 {ta['coverage']:.1%} 不该触发时间轴"
+    assert sum(analysis["coverage"].values()) == counts["kept"]
+    assert index["corpus_hash"] == json.loads(
+        (out / "manifest.json").read_text(encoding="utf-8")
+    )["corpus_hash"]

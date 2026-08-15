@@ -141,7 +141,9 @@ knowledge/*.md
   "schema_version": "0.1",
   "run_id": "…",
   "corpus_hash": "…",
-  "versions": {"kb_init": "0.2.0", "sklearn": "1.7.x", "embedder_adapter": "fastembed-0.x"},
+  "versions": {"kb_init": "…", "python": "…", "numpy": "…", "scipy": "…",
+               "sklearn": "…", "onnxruntime": "…", "embedder_adapter": "fastembed-0.8.0"},
+  "vector_doc_ids": ["d123", "d124"],
   "chunks": [{"chunk_id": "c0001", "doc_id": "d123", "start": 0, "end": 380}],
   "analyses": [{
     "analysis_id": "topics-01",
@@ -204,6 +206,13 @@ knowledge/*.md
   而不是 512 维向量，JSON 不背这个体积。
 - **`groups` 不带 label**（见 §2.4）。
 - **`chunks` 只存偏移**，正文可由 `knowledge/*.md` + 偏移重建。体积与隐私都占便宜。
+- **`vector_doc_ids` 显式记录矩阵行 → doc_id**。不用"按 doc_id 升序"这种约定：切不出块的
+  文档有 assignment 却没有向量行，两者数量本就可以不等，靠约定推断行归属迟早错位，
+  而错位没有任何症状。
+- **`versions` 记 python / numpy / scipy / sklearn / onnxruntime**，`embedder_adapter` 由
+  **适配器自报**——注入假实现时仍写 fastembed，或管线自建的真适配器被记成 injected，
+  都是产物在撒谎。⚠️ 已知边界：`model_revision` 是 repo + 文件路径，不是权重的内容哈希，
+  同一路径理论上可对应不同权重；实际由 `embedder_adapter` 的版本钉住。
 
 ### 与 Plan 1 产物的绑定
 
@@ -270,13 +279,30 @@ JSON 写成而向量写失败（或反之）必须回滚成"没有任何 index �
 | index 文件写失败（JSON 或 .npy），但能清理并完成 manifest + rename | 回滚 index 子事务，发布清洗产物 | 5 |
 | emit / manifest / staging 清理 / 最终 rename 失败 | 沿用 Plan 1：不发布任何东西 | 4 |
 | 语料篇数 < `min_cluster_size` × 2 | 不是错误：`groups: []`，全部 residual，reason `corpus_too_small` | 0 |
-| kept 篇数为 0 / 文档切出 0 个块 | 不是错误：`time_axis.coverage` 显式置 0 不做除法，reason `empty_corpus` | 0 |
+| kept 篇数为 0 | 不是错误：**照常写一份合法的空索引**（`assignments: []` / `vector_doc_ids: []`）。绝不允许"complete 却没有 index 文件"这种说谎状态 | 0 |
+| 文档切出 0 个块（正文全空白） | 补一条 `empty_document` 的 residual；它有 assignment 但没有向量行，靠 `vector_doc_ids` 表达 | 0 |
+| 单个字符的 token 数就超上限 | 显式报错（`contract_violation`）——默默放行等于又一次静默截断 | 5 |
+| tokenizer 的 truncation 关不掉 | 降级为字符切分并**如实**记 `fallback_used: true`，不许自称 token-safe | 0 |
 | 聚类结果全为 residual | 不是错误：合法结果，照常写盘 | 0 |
 | `KeyboardInterrupt` / `SystemExit` | **不吸收、不伪装成 partial success**；照常清理 staging，不产生正式输出 | 130 / 透传 |
 | `--no-index` | 不导入 fastembed、不联网、不写 index 文件，`index_status=skipped` | 0 |
 
 退出码 5 是本层新增，需同步 README。**5 表示"你要的东西拿到了，但索引没做成"**——脚本可据此重跑，
 而不是把它当成整体失败。
+
+**`index_reason` 必须是稳定枚举**，不能是异常类名（那是实现细节，换个库就漂移）：
+`runtime_unavailable` / `model_unavailable` / `inference_failed` / `io_failed` /
+`contract_violation`。
+
+### 7.3 commit 点前后的纪律
+
+除了「索引失败要被吸收」，还有三处会制造**产物已发布但命令报错**，必须一并排除：
+
+1. **返回值在 commit 之前算好**。`summarize()` 放在 rename 之后算，一旦抛错就是这个现象。
+2. **临时目录在 rename 之前主动清掉**。交给 `ExitStack` / `TemporaryDirectory` 在 `run()`
+   返回时清理，清理失败同样发生在 commit 之后。
+3. **staging 的清理条件用「未发布」判定，且 `rmtree(ignore_errors=True)`**。rename 成功与
+   置位之间被 Ctrl-C 打断时，staging 路径已不存在，清理必须是无害的。
 
 ## 8. 测试策略
 

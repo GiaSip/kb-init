@@ -2,12 +2,12 @@
 
 顺序不可调换：落盘（冻结路径）必须发生在任何证据引用生成之前。
 
-zip 临时目录通过 contextlib.ExitStack + tempfile.TemporaryDirectory 管理，
-保证在 run() 返回前（含异常路径）一定被清理，防止用户笔记明文永久留盘。
+临时目录用显式 try/finally 管理而非 ExitStack：ExitStack 的清理发生在 run() 返回时，
+也就是 commit 点之后，清理失败会制造"命令报错但产物已发布"。改为在 rename 之前主动清掉，
+finally 只兜异常路径——两条路径都保证用户笔记明文不会永久留盘。
 """
 from __future__ import annotations
 
-import contextlib
 import shutil
 import tempfile
 import uuid
@@ -17,8 +17,214 @@ from kb_init.clean import mark, summarize
 from kb_init.dates import resolve_date
 from kb_init.emit import emit
 from kb_init.extract import safe_extract, walk_source
-from kb_init.manifest import write_manifest
+from kb_init.manifest import compute_corpus_hash, write_manifest
 from kb_init.parse import parse_file
+
+
+_INDEX_FAILURE_REASONS = (
+    # (异常类型, 稳定 reason_code)。顺序即优先级。
+    (ImportError, "runtime_unavailable"),
+    (FileNotFoundError, "model_unavailable"),
+    (OSError, "io_failed"),
+    (ValueError, "contract_violation"),
+)
+
+
+def _classify_index_failure(exc: Exception) -> str:
+    """把异常映射成**稳定**的 reason_code。
+
+    早前直接写 `type(exc).__name__`：那是实现细节，换个库、换个 Python 版本就漂移，
+    而 manifest 里的 reason 是要给脚本判断用的。
+
+    **这个函数必须是全函数：任何输入都只返回枚举值，绝不抛异常。** 它跑在 except
+    分支里，一旦自己抛出，原异常就会穿透出去把清洗产物一起带走——而它最容易抛的
+    恰恰是 ImportError：早前它惰性导入 `EmbeddingError`，而触发它的第一现场
+    可能正是 `embed.py` 导不进来（比如缺 numpy）。所以先判内建类型，
+    再**在保护下**尝试识别自定义异常。
+    """
+    for exc_type, reason in _INDEX_FAILURE_REASONS:
+        if isinstance(exc, exc_type):
+            return reason
+    try:
+        from kb_init.embed import EmbeddingError
+
+        if isinstance(exc, EmbeddingError):
+            return "inference_failed"
+    except Exception:
+        pass
+    return "inference_failed"
+
+
+def _versions(embedder=None) -> dict:
+    """可复现性的版本边界：同样的输入只在同样的依赖版本下才保证同样的输出。
+
+    聚类结果会随 sklearn / numpy / scipy 版本变化，embedding 会随推理运行时与
+    模型文件变化——不记下来，"可复现"就是一句无法验证的断言。
+
+    `embedder_adapter` 取自实际使用的 embedder：注入假实现时仍写 fastembed，
+    等于让产物撒谎。
+    """
+    import sys
+
+    from kb_init import __version__
+
+    def _ver(module_name: str) -> str:
+        try:
+            from importlib.metadata import version
+
+            return version(module_name)
+        except Exception:
+            return "unknown"
+
+    adapter = getattr(embedder, "provenance", None)
+    if adapter is None:
+        if embedder is None:
+            from kb_init.embed import _fastembed_version
+
+            adapter = _fastembed_version()
+        else:
+            adapter = f"injected:{type(embedder).__name__}"
+
+    return {
+        "kb_init": __version__,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "numpy": _ver("numpy"),
+        "scipy": _ver("scipy"),
+        "sklearn": _ver("scikit-learn"),
+        "onnxruntime": _ver("onnxruntime"),
+        "embedder_adapter": adapter,
+    }
+
+
+def _run_index_stage(
+    staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str
+) -> tuple[str, str | None]:
+    """在 staging 内构建索引，返回 (status, reason)。
+
+    **失败必须在这里被吸收成状态。** run() 的 finally 会在未发布时 rmtree(staging)：
+    任何在 rename 之前传播出去的异常都会连清洗产物一起删掉——那样 CLI 再返回
+    退出码 5 就是在撒谎，因为产物根本不存在。
+
+    只接 `Exception`：`KeyboardInterrupt` / `SystemExit` 是 BaseException，必须透传，
+    不能被伪装成"部分成功"。
+
+    **索引专属的 import 必须写在 try 里面。** 曾经把它们放在函数开头，结果平台缺
+    sklearn / onnxruntime wheel 时（R15 点名的风险）ImportError 直接穿透出去，
+    staging 连同清洗产物一起被删——正是退出码 5 承诺不会发生的事。
+    """
+    kept = [d for d in docs if d.status == "kept"]
+
+    try:
+        from kb_init.chunk import chunk_documents
+        from kb_init.cluster import Assignment, cluster_documents
+        from kb_init.embed import pool_chunk_vectors
+        from kb_init.index import (
+            build_index,
+            build_time_axis,
+            validate_index,
+            write_index,
+        )
+
+        import numpy as np
+
+        bodies = {d.doc_id: d.body for d in kept}
+        # 空语料短路：既然没有任何文本要编码，就不该先把 90MB 模型加载起来、
+        # 也不该让「写一份合法空索引」依赖 sklearn/onnxruntime 装没装好。
+        if not kept:
+            splitter_meta = {"name": "none", "max_tokens": 512, "fallback_used": False}
+            model_name = getattr(embedder, "model_name", "none") if embedder else "none"
+            chunks, doc_ids = [], []
+            matrix = np.zeros((0, 0), dtype=np.float32)
+            groups, assignments = [], []
+        else:
+            if splitter is None:
+                from kb_init.embed import build_splitter
+
+                splitter, splitter_meta = build_splitter()
+            else:
+                splitter_meta = {
+                    "name": "injected", "max_tokens": 512, "fallback_used": False
+                }
+
+            if embedder is None:
+                from kb_init.embed import DEFAULT_MODEL, FastEmbedEmbedder
+
+                embedder = FastEmbedEmbedder()
+                model_name = DEFAULT_MODEL
+            else:
+                model_name = getattr(embedder, "model_name", "injected")
+
+            chunks = chunk_documents([(d.doc_id, d.body) for d in kept], splitter)
+            vectors = list(
+                embedder.embed([bodies[c.doc_id][c.start:c.end] for c in chunks])
+            )
+            doc_ids, matrix = pool_chunk_vectors(chunks, vectors)
+            # 全部文档都切不出块时同样不必进聚类
+            groups, assignments = (
+                cluster_documents(doc_ids, matrix) if doc_ids else ([], [])
+            )
+
+        # 切不出块的文档（正文为空白）拿不到向量，必须显式补一条 residual，
+        # 否则「每个 kept doc 恰有一条 assignment」这条合同会被悄悄破坏。
+        missing = sorted({d.doc_id for d in kept} - set(doc_ids))
+        assignments = list(assignments) + [
+            Assignment(d, "residual", (), "empty_document") for d in missing
+        ]
+
+        dated_by_doc = {
+            d.doc_id: d.created
+            for d in kept
+            if d.date_source not in ("unknown", "unresolved") and d.created
+        }
+        index = build_index(
+            run_id=run_id,
+            corpus_hash=corpus_hash,
+            chunks=chunks,
+            groups=groups,
+            assignments=assignments,
+            method={
+                "family": "density",
+                "name": "hdbscan",
+                "model": model_name,
+                "model_revision": getattr(embedder, "revision", ""),
+                "params": {
+                    "min_cluster_size": 5,
+                    "min_samples": 5,
+                    "metric": "euclidean",
+                },
+                "seed": 0,
+                "splitter": splitter_meta,
+                "pooling": "mean_l2",
+                "score_kind": "density_membership",
+                "score_direction": "higher_better",
+                "decision_threshold": None,
+            },
+            time_axis=build_time_axis(
+                len(dated_by_doc),
+                len(kept),
+                dates_by_doc=dated_by_doc,
+                groups=groups,
+                assignments=assignments,
+            ),
+            versions=_versions(embedder),
+            vector_doc_ids=doc_ids,
+        )
+        validate_index(index, [d.doc_id for d in kept], matrix, bodies)
+        write_index(staging, index, matrix)
+        return "complete", None
+    except Exception as exc:
+        reason = _classify_index_failure(exc)
+        try:
+            from kb_init.index import cleanup_index_files, index_files_remain
+
+            cleanup_index_files(staging)
+            if index_files_remain(staging):
+                # 回滚没干净就不能声称"只是索引没做成"——半个索引会让 2B 读到
+                # 一份说谎的产物，那比整次失败更糟。
+                raise OSError("索引半成品无法清除")
+        except ImportError:
+            pass                        # index 模块本身没导入成功，自然没有半成品
+        return "failed", reason
 
 
 def run(
@@ -26,20 +232,45 @@ def run(
     out_dir: Path,
     wikilinks: bool = False,
     run_id: str | None = None,
+    no_index: bool = False,
+    embedder=None,
+    splitter=None,
 ) -> dict:
     source = Path(source)
     out_dir = Path(out_dir)
     run_id = run_id or uuid.uuid4().hex[:12]
 
     collisions: list[dict] = []
+    scratch: list[Path] = []            # zip 解压临时目录，见下方 _discard
+    staging: Path | None = None
+    published = False
 
-    with contextlib.ExitStack() as stack:
+    def _discard_strict() -> None:
+        """commit **之前**的严格清理：删完必须复核路径确实不在了。
+
+        用户笔记的明文躺在这些临时目录里。`ignore_errors=True` 删不掉也当作删掉，
+        然后照常发布产物——那就等于一边承诺"全程本地不留痕"，一边把明文留在盘上。
+        删不掉就在 rename 之前中止，宁可整次失败。
+        """
+        for path in list(scratch):
+            shutil.rmtree(path, ignore_errors=True)
+            if path.exists():
+                raise OSError(f"临时解压目录无法删除，拒绝在明文残留的情况下发布：{path}")
+            scratch.remove(path)
+
+    def _discard_best_effort() -> None:
+        """异常路径上的兜底清理。**永不抛异常**——此时已经在处理别的失败了。"""
+        for path in list(scratch):
+            shutil.rmtree(path, ignore_errors=True)
+        scratch.clear()
+
+    try:
         if source.is_file() and source.suffix.lower() == ".zip":
-            # ExitStack 确保 TemporaryDirectory 在 run() 返回前被删除，
-            # 无论正常返回还是异常退出——防止用户笔记明文留在临时目录。
-            tmp_dir = Path(
-                stack.enter_context(tempfile.TemporaryDirectory(prefix="kb-init-"))
-            )
+            # 不用 TemporaryDirectory + ExitStack：它的清理发生在 run() 返回时，
+            # 也就是 commit 点之后；清理失败就会在产物已发布后抛异常。
+            # 改为手动管理，在 rename 之前主动清掉。
+            tmp_dir = Path(tempfile.mkdtemp(prefix="kb-init-"))
+            scratch.append(tmp_dir)
             base = safe_extract(source, tmp_dir)
             files = walk_source(base, collisions=collisions)
         else:
@@ -79,12 +310,18 @@ def run(
         # 之后任何「重建目录好让自动清理无害」的补救都发生在 commit 点之后——
         # 那一步若失败就会出现「命令报错但产物已发布」，破坏失败原子性。
         staging = Path(tempfile.mkdtemp(prefix=".kb-init-staging-", dir=parent))
-        published = False
-        stack.callback(
-            lambda: None if published else shutil.rmtree(staging, ignore_errors=True)
-        )
 
         result = emit(docs, staging, wikilinks=wikilinks)
+
+        corpus_hash = compute_corpus_hash(docs)
+        if no_index:
+            index_status, index_reason = "skipped", None
+        else:
+            index_status, index_reason = _run_index_stage(
+                staging, docs, embedder, splitter,
+                run_id=run_id, corpus_hash=corpus_hash,
+            )
+
         write_manifest(
             docs,
             staging,
@@ -92,13 +329,32 @@ def run(
             source=str(source),
             unresolved_links=result.unresolved_links,
             skipped_inputs=collisions,
+            index_status=index_status,
+            index_reason=index_reason,
         )
+
+        # 返回值在 commit **之前**算好。放在 rename 之后算，一旦 summarize 抛错
+        # 就会出现"产物已发布但命令报错"——那正是失败原子性要排除的现象。
+        summary = summarize(docs)
+        summary["index_status"] = index_status
+        summary["index_reason"] = index_reason
+
+        # 临时目录在 commit 前严格清掉：放到 return 时清理，一旦清理失败就会在
+        # 产物已发布之后抛异常，制造"命令报错但产物已发布"；而删不干净又照常发布，
+        # 等于把用户笔记的明文留在盘上。两者都不接受，所以在这里删并复核。
+        _discard_strict()
 
         # 发布：一次 rename。out_dir 若已存在（空目录）先移走，
         # 使 rename 目标不存在——同一文件系统内 rename 是原子的。
         if out_dir.exists():
             out_dir.rmdir()             # 上面已确保它是空的
-        staging.rename(out_dir)         # ← commit 点，此后不做任何可能失败的事
+        staging.rename(out_dir)         # ← commit 点，此后不做任何事
         published = True
-
-        return summarize(docs)
+        return summary
+    finally:
+        # staging 只在**未发布**时清理。判据用"路径是否还在"而不是只看 published：
+        # rename 成功与置位之间若被 Ctrl-C 打断，staging 路径已经不存在，
+        # rmtree 也就不会误删已发布的产物。
+        if not published and staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        _discard_best_effort()
