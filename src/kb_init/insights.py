@@ -284,3 +284,145 @@ def build_residual_insights(
                  "evidence_titles": [titles.get(d, "") for d in evidence]},
                 "", {"doc_ids": evidence, "stat": {"longest_chars": longest}}, None)))
     return out
+
+
+SCHEMA_VERSION = "0.1"
+GATE_RULES_VERSION = "2b-1"
+INSUFFICIENT_TOPICS_THRESHOLD = 4
+TOPICS_CONCENTRATED_THRESHOLD = 2
+RESIDUAL_HIGH_THRESHOLD = 0.70
+INSIGHT_FILES = ("insights.json", "insights.md")
+
+
+def build_revisit_gate(
+    topic_count: int,
+    presentation_group_count: int,
+    residual_share: float,
+    corpus_is_first_party: bool = True,
+) -> dict:
+    """回头条件的**收据**，不是开关：触发不改变任何运行时行为。
+
+    2B 只供数、不自授裁决权——`state` 由本函数按 rules_version 记录的规则算出，
+    是可复现的记录，供下一次人类决策使用。
+
+    第三条只在**非本人语料**上可判。拿本人的第二份语料冒充它通过，
+    正是这条回头条件想防的自证。
+
+    ⚠️ 判据是 **topic 族条数**，不是洞察总数。按总数算的话，corpus 族的统计条目
+    会把数量填满，①永远为假——这个项目已经有三轮「留一条兜底路径，规则就被
+    它绕过」的事故史。
+    """
+    def cond(cid, threshold, observed, triggered, prescription, not_evaluable=None):
+        item = {"id": cid, "threshold": threshold, "observed": observed,
+                "state": "triggered" if triggered else "not_triggered",
+                "prescription": prescription}
+        if not_evaluable:
+            item["state"] = "not_evaluable"
+            item["reason"] = not_evaluable
+        return item
+
+    return {
+        "rules_version": GATE_RULES_VERSION,
+        "inputs": {
+            "topic_insight_count": topic_count,
+            "presentation_group_count": presentation_group_count,
+            "residual_share": round(residual_share, 6),
+            "corpus_is_first_party": corpus_is_first_party,
+        },
+        "conditions": [
+            cond("insufficient_topics", INSUFFICIENT_TOPICS_THRESHOLD, topic_count,
+                 topic_count < INSUFFICIENT_TOPICS_THRESHOLD, "subdivide"),
+            cond("topics_concentrated", TOPICS_CONCENTRATED_THRESHOLD,
+                 presentation_group_count,
+                 presentation_group_count <= TOPICS_CONCENTRATED_THRESHOLD,
+                 "subdivide"),
+            cond("residual_high", RESIDUAL_HIGH_THRESHOLD, round(residual_share, 6),
+                 residual_share > RESIDUAL_HIGH_THRESHOLD, "halo",
+                 not_evaluable="requires_third_party_corpus"
+                 if corpus_is_first_party else None),
+        ],
+    }
+
+
+def build_insight_set(
+    index: dict,
+    manifest: dict,
+    bodies: dict[str, str],
+    titles: dict[str, str],
+    *,
+    corpus_is_first_party: bool = True,
+) -> dict:
+    from dataclasses import asdict
+
+    from kb_init import __version__
+    from kb_init.keywords import DEFAULT_PARAMS
+
+    kept = manifest["counts"]["kept"]
+    topics, truncated = build_topic_insights(index, bodies, titles, kept)
+    residual = build_residual_insights(index, bodies, titles, kept)
+    corpus = build_corpus_insights(manifest, index)
+    items = [*topics, *residual, *corpus]
+
+    families = [i.family for i in items]
+    refs = presentation_groups(index)
+    residual_share = len(effective_residual_ids(index)) / kept if kept else 0.0
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run_id": index["run_id"],
+        "corpus_hash": index["corpus_hash"],
+        "index_schema_version": index["schema_version"],
+        "versions": {"kb_init": __version__},
+        "naming": {"method": DEFAULT_PARAMS["method"],
+                   "params": {k: v for k, v in DEFAULT_PARAMS.items()
+                              if k != "method"}},
+        "presentation": {
+            "group_refs": [{"analysis_id": a, "group_id": g} for a, g in refs],
+            "truncated": truncated,
+        },
+        # counts 由数组派生。独立计数迟早与数组漂移，而漂移没有症状。
+        "counts": {"topic": families.count("topic"),
+                   "residual": families.count("residual"),
+                   "corpus": families.count("corpus"),
+                   "total": len(items)},
+        "revisit_gate": build_revisit_gate(
+            families.count("topic"), len(refs), residual_share,
+            corpus_is_first_party),
+        "insights": [asdict(i) for i in items],
+    }
+
+
+def write_insights(out_dir, payload: dict, markdown: str) -> None:
+    """洞察子事务：两个文件要么都发布，要么都不发布。
+
+    只有 md 没有 json，用户会对着一份永远 validate 不过的清单勾选。
+    """
+    import json
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    try:
+        (out_dir / "insights.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        (out_dir / "insights.md").write_text(markdown, encoding="utf-8")
+    except BaseException:
+        cleanup_insight_files(out_dir)
+        raise
+
+
+def cleanup_insight_files(out_dir) -> None:
+    """逐个独立尝试——连续 unlink 时第一个失败会中断第二个，
+    留下的恰恰是最危险的半份产物。"""
+    from pathlib import Path
+
+    for name in INSIGHT_FILES:
+        try:
+            (Path(out_dir) / name).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def insight_files_remain(out_dir) -> bool:
+    from pathlib import Path
+
+    return any((Path(out_dir) / name).exists() for name in INSIGHT_FILES)

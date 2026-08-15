@@ -284,3 +284,129 @@ def test_topic_text_does_not_claim_to_be_a_topic_name():
     topics, _ = build_topic_insights(index, bodies, titles, 15)
     assert "最具区分度的词" in topics[0].canonical_text
     assert "你的主题是" not in topics[0].canonical_text
+
+
+# ---------------- revisit_gate + 组装 + 写盘 ----------------
+
+import json
+
+import pytest
+
+from kb_init.insights import (
+    GATE_RULES_VERSION,
+    build_insight_set,
+    build_revisit_gate,
+    cleanup_insight_files,
+    insight_files_remain,
+    write_insights,
+)
+
+
+def _std_manifest():
+    return {"counts": {"total": 40, "kept": 25, "dropped_stub": 15,
+                       "dropped_duplicate": 0},
+            "unresolved_links": [], "documents": []}
+
+
+def test_gate_marks_residual_not_evaluable_on_first_party_corpus():
+    gate = build_revisit_gate(topic_count=10, presentation_group_count=10,
+                              residual_share=0.84, corpus_is_first_party=True)
+    states = {c["id"]: c for c in gate["conditions"]}
+    assert states["residual_high"]["state"] == "not_evaluable"
+    assert states["residual_high"]["reason"] == "requires_third_party_corpus"
+    assert states["residual_high"]["prescription"] == "halo"
+    assert gate["rules_version"] == GATE_RULES_VERSION
+
+
+def test_gate_triggers_on_third_party_corpus_with_high_residual():
+    gate = build_revisit_gate(10, 10, 0.84, corpus_is_first_party=False)
+    states = {c["id"]: c for c in gate["conditions"]}
+    assert states["residual_high"]["state"] == "triggered"
+
+
+def test_gate_does_not_trigger_residual_when_share_is_low():
+    gate = build_revisit_gate(10, 10, 0.32, corpus_is_first_party=False)
+    states = {c["id"]: c for c in gate["conditions"]}
+    assert states["residual_high"]["state"] == "not_triggered"
+
+
+def test_gate_topic_conditions_use_topic_count_not_total():
+    gate = build_revisit_gate(topic_count=2, presentation_group_count=2,
+                              residual_share=0.1, corpus_is_first_party=False)
+    states = {c["id"]: c for c in gate["conditions"]}
+    assert states["insufficient_topics"]["state"] == "triggered"
+    assert states["topics_concentrated"]["state"] == "triggered"
+    assert states["insufficient_topics"]["prescription"] == "subdivide"
+
+
+def test_counts_are_derived_from_the_insight_array():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    payload = build_insight_set(index, _std_manifest(), bodies, titles)
+    families = [i["family"] for i in payload["insights"]]
+    assert payload["counts"]["total"] == len(payload["insights"])
+    assert payload["counts"]["topic"] == families.count("topic") == 3
+    assert payload["counts"]["corpus"] == families.count("corpus")
+    assert payload["counts"]["residual"] == families.count("residual")
+
+
+def test_insight_ids_are_unique_and_bound_to_the_index_run():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    payload = build_insight_set(index, _std_manifest(), bodies, titles)
+    ids = [i["insight_id"] for i in payload["insights"]]
+    assert len(set(ids)) == len(ids)
+    assert payload["run_id"] == index["run_id"]
+    assert payload["corpus_hash"] == index["corpus_hash"]
+
+
+def test_naming_params_are_recorded_in_the_artifact():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    payload = build_insight_set(index, _std_manifest(), bodies, titles)
+    params = payload["naming"]["params"]
+    for key in ("min_lift", "min_cluster_df", "cjk_min_boundary_entropy", "stoplist"):
+        assert key in params
+
+
+def test_every_insight_carries_nonempty_canonical_text():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    payload = build_insight_set(index, _std_manifest(), bodies, titles)
+    assert payload["insights"]
+    for item in payload["insights"]:
+        assert item["canonical_text"]
+
+
+def test_is_byte_identical_across_runs():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    a = json.dumps(build_insight_set(index, _std_manifest(), bodies, titles),
+                   ensure_ascii=False)
+    b = json.dumps(build_insight_set(index, _std_manifest(), bodies, titles),
+                   ensure_ascii=False)
+    assert a == b
+
+
+def test_write_is_a_sub_transaction(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    real = Path.write_text
+
+    def explode(self, *a, **k):
+        if self.name == "insights.md":
+            raise OSError("写 md 失败")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "write_text", explode)
+    with pytest.raises(OSError):
+        write_insights(tmp_path, {"insights": []}, "# md")
+    monkeypatch.undo()
+    assert not insight_files_remain(tmp_path)
+
+
+def test_write_then_cleanup_leaves_nothing(tmp_path):
+    write_insights(tmp_path, {"insights": []}, "# md")
+    assert insight_files_remain(tmp_path)
+    cleanup_insight_files(tmp_path)
+    assert not insight_files_remain(tmp_path)
