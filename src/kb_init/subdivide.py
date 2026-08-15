@@ -55,3 +55,65 @@ def flagged_groups(
 ) -> list[str]:
     """内聚度没比「未分类堆」高出多少的 group——它不是一个主题。"""
     return sorted(g for g, lift in lifts.items() if lift < lift_min)
+
+
+def subdivide_group(
+    group_id: str,
+    member_ids: Sequence[str],
+    rows: Mapping[str, np.ndarray],
+    baseline_cohesion: float,
+    *,
+    min_cluster_size: int = 5,
+    min_samples: int = 5,
+    lift_min: float = COHESION_LIFT_MIN,
+) -> tuple[list, list]:
+    """把一个被标记的 group 细分，**子簇逐个过同一个检测器**。
+
+    通不过的子簇不是「勉强留着」——它的成员折回 residual。放行一个通不过的
+    子簇，等于用一个更小的大杂烩换掉一个更大的，产物照样在撒谎。
+
+    返回的 assignments 恰好覆盖 `member_ids` 全体：这一层是 analyses[1]，
+    它的 input_scope 就是父 group 的成员集合，不多不少。
+    """
+    from kb_init.cluster import Assignment, cluster_documents
+
+    member_ids = sorted(member_ids)
+    matrix = np.vstack([rows[d] for d in member_ids])
+    children, child_assignments = cluster_documents(
+        member_ids,
+        matrix,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        cluster_selection_method="leaf",
+        group_id_prefix=f"{group_id}s",
+    )
+
+    members_of: dict[str, list[str]] = {}
+    for a in child_assignments:
+        for m in a.memberships:
+            members_of.setdefault(m.group_id, []).append(a.doc_id)
+
+    kept_children = []
+    for child in children:
+        members = members_of.get(child.group_id, [])
+        if len(members) < 2:
+            continue
+        lift = cohesion(np.vstack([rows[d] for d in members])) - baseline_cohesion
+        if lift >= lift_min:
+            kept_children.append(child)
+    kept_ids = {c.group_id for c in kept_children}
+
+    assignments = []
+    for a in child_assignments:
+        keep = [m for m in a.memberships if m.group_id in kept_ids]
+        if keep:
+            assignments.append(Assignment(a.doc_id, "assigned", tuple(keep), None))
+        elif a.memberships:
+            assignments.append(
+                Assignment(a.doc_id, "residual", (), "subdivision_rejected")
+            )
+        else:
+            assignments.append(
+                Assignment(a.doc_id, "residual", (), "under_differentiated_parent")
+            )
+    return kept_children, assignments

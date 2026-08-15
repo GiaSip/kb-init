@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from kb_init.subdivide import COHESION_LIFT_MIN, cohesion, flagged_groups, group_lifts
+from kb_init.subdivide import (
+    COHESION_LIFT_MIN,
+    cohesion,
+    flagged_groups,
+    group_lifts,
+    subdivide_group,
+)
 
 
 def _unit(v):
@@ -64,3 +70,61 @@ def test_empty_residual_baseline_flags_nothing():
     lifts = group_lifts({"g01": ["a1", "a2"]}, [], rows)
     assert lifts == {}
     assert flagged_groups(lifts) == []
+
+
+def _two_tight_blobs(n=6):
+    rows, ids = {}, []
+    for i in range(n):
+        for axis, tag in ((0, "a"), (1, "b")):
+            v = np.zeros(3, dtype=np.float32)
+            v[axis] = 1.0
+            v[2] = 0.001 * i
+            v /= np.linalg.norm(v)
+            doc = f"{tag}{i:02d}"
+            rows[doc] = v
+            ids.append(doc)
+    return ids, rows
+
+
+def test_subdivision_splits_a_blob_into_passing_children():
+    ids, rows = _two_tight_blobs()
+    baseline = 0.3                                   # 远低于两个团各自的内聚度
+    groups, assignments = subdivide_group("g01", ids, rows, baseline,
+                                          min_cluster_size=3, min_samples=3)
+    assert len(groups) >= 2, "只产出一个子簇时下面的断言会恒真"
+    assert all(g.group_id.startswith("g01s") for g in groups)
+    assert sorted(a.doc_id for a in assignments) == sorted(ids)
+
+
+def test_children_failing_the_detector_fold_back_to_residual():
+    ids, rows = _two_tight_blobs()
+    baseline = 0.999                                 # 高到没有子簇能通过
+    groups, assignments = subdivide_group("g01", ids, rows, baseline,
+                                          min_cluster_size=3, min_samples=3)
+    assert groups == []
+    assert len(assignments) == len(ids)              # 防「返回空列表」让下面恒真
+    assert all(a.disposition == "residual" for a in assignments)
+    assert {a.reason_code for a in assignments} <= {
+        "subdivision_rejected", "under_differentiated_parent"}
+
+
+def test_assignments_never_reference_a_dropped_child_group():
+    ids, rows = _two_tight_blobs()
+    groups, assignments = subdivide_group("g01", ids, rows, 0.3,
+                                          min_cluster_size=3, min_samples=3)
+    known = {g.group_id for g in groups}
+    referenced = {m.group_id for a in assignments for m in a.memberships}
+    assert referenced, "没有任何 membership 时这条断言恒真"
+    assert referenced <= known
+
+
+def test_member_counts_match_actual_memberships():
+    ids, rows = _two_tight_blobs()
+    groups, assignments = subdivide_group("g01", ids, rows, 0.3,
+                                          min_cluster_size=3, min_samples=3)
+    for g in groups:
+        actual = sum(1 for a in assignments
+                     for m in a.memberships if m.group_id == g.group_id)
+        assert actual > 0
+        assert g.member_counts["total_docs"] == actual
+        assert g.member_counts["core"] == actual
