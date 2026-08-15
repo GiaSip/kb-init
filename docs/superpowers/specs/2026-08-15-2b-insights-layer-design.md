@@ -113,6 +113,15 @@ analyses[1]  input_scope = {kind: "parent_group",
    不通过的，其成员**折回 residual**，`reason_code = "subdivision_rejected"`。
 5. 父 group 的成员中未进入任何通过子簇的，折回 residual，`reason_code = "under_differentiated_parent"`。
 
+> **`analyses[0]` 一个字节都不改。** "折回 residual"指的是这些文档在 `analyses[1]` 里的
+> `disposition` 是 `residual`，不是回头去编辑第一轮的结果。2A 合同要求"同时保留第一轮的
+> residual 与第二轮的 assigned 两套 disposition"，改写父分析会直接毁掉这条。
+>
+> 因此 `analyses[1].assignments` **恰好覆盖父 group 的全部成员**（不多不少），
+> 而"这次运行实际没有主题的文档"是一个**派生量**：
+> `analyses[0] 的 residual` ∪ `analyses[1] 的 residual`。
+> 该派生由 §3.3 的公共函数统一给出，下游不各自拼。
+
 实测（Notion g01，509 篇）：细分出 9 个子簇，**9/9 全部通过检测器**（lift +0.165 … +0.242，
 与正常簇同档），394 篇折回 residual。人工核验九个子簇全部可一句话命名（样本在仓库外报告）。
 
@@ -197,8 +206,13 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
 > **呈现级 group = 所有未被标记 `under_differentiated` 的 group，
 > 加上所有通过检测器的子簇。**
 
-这条规则由 2B 实现为一个公共函数 `presentation_groups(index)`，2C / 2D / 2E 一律调它，
-不各自解释 `analyses` 数组——**否则三个下游会长出三套不一致的解释**。
+这条规则由 2B 实现为**两个**公共函数，2C / 2D / 2E 一律调它们，不各自解释 `analyses` 数组
+——**否则三个下游会长出三套不一致的解释**：
+
+```python
+presentation_groups(index) -> list[GroupRef]   # 有序，顺序即呈现顺序
+effective_residual_ids(index) -> list[str]     # 各分析 residual 的并集，去重后排序
+```
 
 ### 3.4 主题数超限时的截断
 
