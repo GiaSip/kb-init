@@ -102,3 +102,40 @@ def test_permutation_invariance_compares_full_objects():
                                min_cluster_size=5, min_samples=3)
     assert g1 == g2
     assert sorted(a1, key=lambda a: a.doc_id) == sorted(a2, key=lambda a: a.doc_id)
+
+
+def _blobs(centres, per_blob=6, jitter=0.01):
+    """围绕给定中心生成确定性的小簇，不用随机数——测试不能靠运气。"""
+    ids, rows = [], []
+    for c_idx, centre in enumerate(centres):
+        for k in range(per_blob):
+            v = np.array(centre, dtype=np.float32).copy()
+            v[c_idx % len(centre)] += jitter * (k + 1)
+            v /= np.linalg.norm(v)
+            ids.append(f"d{c_idx}{k:02d}")
+            rows.append(v)
+    return ids, np.vstack(rows)
+
+
+def test_group_id_prefix_is_applied():
+    ids, matrix = _blobs([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    groups, _ = cluster_documents(ids, matrix, group_id_prefix="g01s")
+    assert groups, "前缀测试需要至少一个簇，否则断言恒真"
+    assert all(g.group_id.startswith("g01s") for g in groups)
+    assert len({g.group_id for g in groups}) == len(groups)
+
+
+def test_default_prefix_and_method_unchanged():
+    ids, matrix = _blobs([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    groups, _ = cluster_documents(ids, matrix)
+    assert groups and groups[0].group_id == "g01"
+
+
+def test_leaf_method_is_accepted_and_deterministic():
+    ids, matrix = _blobs([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+    first = cluster_documents(ids, matrix, cluster_selection_method="leaf")
+    second = cluster_documents(ids, matrix, cluster_selection_method="leaf")
+    assert [g.group_id for g in first[0]] == [g.group_id for g in second[0]]
+    assert [(a.doc_id, a.disposition) for a in first[1]] == \
+           [(a.doc_id, a.disposition) for a in second[1]]
+    assert len(first[0]) >= 2, "确定性断言需要真的聚出簇，否则两边都空也相等"

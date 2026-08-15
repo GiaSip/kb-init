@@ -113,6 +113,20 @@ analyses[1]  input_scope = {kind: "parent_group",
    不通过的，其成员**折回 residual**，`reason_code = "subdivision_rejected"`。
 5. 父 group 的成员中未进入任何通过子簇的，折回 residual，`reason_code = "under_differentiated_parent"`。
 
+> **细分不回头修改 `analyses[0]` 的任何字段。** "折回 residual"指的是这些文档在
+> `analyses[1]` 里的 `disposition` 是 `residual`，不是回头去编辑第一轮的结果。
+> 2A 合同要求"同时保留第一轮的 residual 与第二轮的 assigned 两套 disposition"，
+> 改写父分析会直接毁掉这条。
+>
+> ⚠️ 这**不等于**"`analyses[0]` 与 2A 时期逐字节相同"：本轮给 `method.params` 新增了
+> `cluster_selection_method` 与 `cohesion_lift_min`（参数必须随产物落盘）。
+> 不变的是**细分这个动作**不碰父分析，不是 schema 冻结。
+>
+> 因此 `analyses[1].assignments` **恰好覆盖父 group 的全部成员**（不多不少），
+> 而"这次运行实际没有主题的文档"是一个**派生量**：
+> `analyses[0] 的 residual` ∪ `analyses[1] 的 residual`。
+> 该派生由 §3.3 的公共函数统一给出，下游不各自拼。
+
 实测（Notion g01，509 篇）：细分出 9 个子簇，**9/9 全部通过检测器**（lift +0.165 … +0.242，
 与正常簇同档），394 篇折回 residual。人工核验九个子簇全部可一句话命名（样本在仓库外报告）。
 
@@ -158,14 +172,24 @@ Apple Notes 上**没有任何 group 触发检测器**，因此 2A′ 在该语�
 
 | kind | 内容 | 条件 |
 |---|---|---|
-| `topic_cluster` | 关键词命名 + 篇数 + 占 kept 比例 + 3 篇证据 | 每个通过检测器的 group |
+| `topic_cluster` | 关键词命名 + 篇数 + 占 kept 比例 + 3 篇证据 | 每个通过检测器**且抽得出关键词**的 group |
+
+> **抽不出关键词就不产出这条洞察。** 曾经产出过「（没有足够区分度的词）」的占位——
+> 它既是空洞察（违反硬不变量 #3），又会计进 topic 数从而把 revisit gate 顶过阈值，
+> 等于给回头条件开了第四条兜底路径。但也不许静默消失：group 本身留在
+> `presentation.group_refs` 里，并在 `truncated.unnamed_group_refs` 显式记账。
 
 `residual` 族：
 
 | kind | 内容 | 条件 |
 |---|---|---|
 | `fragment_zone` | X 篇没有形成主题（占 kept Y%） | `residual > 0` |
-| `long_orphans` | 碎片区里最长的 N 篇（纯按长度排序，**不做任何归属**） | 碎片区中存在长度进入 kept 前 20% 的文档 |
+| `long_orphans` | 碎片区里篇幅最大的 3 篇（纯按长度排序，**不做任何归属**） | `residual ≥ 3` |
+
+> ⚠️ 这条起初写的是「长度进入 kept 前 20% 的文档」，实施时被证伪：**residual 占
+> 77–84% 是这类语料的常态**，用全语料分位数时分位点本身就被 residual 主导——
+> 阈值取严就恒假、取松就把整个碎片区都说成「长笔记」（两种都实际撞到了）。
+> 改成无阈值的排序，既不可能空洞，也不引入魔数。
 
 `corpus` 族：
 
@@ -174,7 +198,7 @@ Apple Notes 上**没有任何 group 触发检测器**，因此 2A′ 在该语�
 | `retention` | total → kept，空壳丢弃数、重复丢弃数 | 总是 |
 | `date_blindness` | 可解析日期占比，**以及三类时间洞察为何不在这份报告里** | `time_axis.available == false` |
 | `broken_refs` | 未解析引用数，按"图片/附件 vs 文档"分类 | `unresolved_links > 0` |
-| `length_profile` | 篇幅中位数 / 最长 / 不足 N 字的篇数 | 总是 |
+| `length_profile` | 篇幅中位数 / 最短 / 最长 | kept 非空 |
 | `exact_duplicates` | 内容完全相同被合并的篇数 | `dropped_duplicate > 0` |
 
 条件不成立就**不产出**——绝不输出"你有 0 篇重复文档"这种为了凑数的空洞察（硬不变量 #3）。
@@ -184,10 +208,10 @@ Apple Notes 上**没有任何 group 触发检测器**，因此 2A′ 在该语�
 
 | | topic | residual | corpus | 总计 |
 |---|---|---|---|---|
-| Apple Notes | 5 | 2 | 4 | **11** |
-| Notion（2A′ 后） | 10 | 2 | 4 | **16** |
+| Apple Notes | 5 | 2 | 5 | **12** |
+| Notion（2A′ 后） | 10 | 2 | 5 | **17** |
 
-Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达到的下限**——
+Apple Notes 落在 12，压着人肉 gate 的上限下沿。**这不是缺陷，12 不是要靠凑数达到的下限**——
 它是人肉 gate 的疲劳上限。①的判据是 topic 族，不是总数。
 
 ### 3.3 呈现级 group 的定义（下游唯一该读的那一层）
@@ -197,8 +221,13 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
 > **呈现级 group = 所有未被标记 `under_differentiated` 的 group，
 > 加上所有通过检测器的子簇。**
 
-这条规则由 2B 实现为一个公共函数 `presentation_groups(index)`，2C / 2D / 2E 一律调它，
-不各自解释 `analyses` 数组——**否则三个下游会长出三套不一致的解释**。
+这条规则由 2B 实现为**两个**公共函数，2C / 2D / 2E 一律调它们，不各自解释 `analyses` 数组
+——**否则三个下游会长出三套不一致的解释**：
+
+```python
+presentation_groups(index) -> list[GroupRef]   # 有序，顺序即呈现顺序
+effective_residual_ids(index) -> list[str]     # 各分析 residual 的并集，去重后排序
+```
 
 ### 3.4 主题数超限时的截断
 
@@ -244,19 +273,28 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
 
 | 过滤器 | 作用 | 治什么 |
 |---|---|---|
-| 簇内文档频率 ≥ 2 | 词至少出现在簇内两篇里 | 单篇偶然词 |
-| 簇内文档频率 < 0.9 | 几乎每篇都有的词不具区分力 | 簇内样板词 |
-| 全局文档频率 ≤ `GLOBAL_DF_CAP` | 全语料通用词 | 跨簇重复的模板词 |
-| CJK n-gram 内聚度（PMI） | n-gram 的出现频率显著高于其字符独立出现的乘积 | 滑窗位移碎片（非词） |
+| 内置通用词表 | 功能词与无领域信号的高频词 | `che` / `non` / `people` / `bene` 当簇名 |
+| 簇内文档频率 ≥ `MIN_CLUSTER_DF` | 词至少出现在簇内两篇里 | 单篇偶然词 |
+| **lift ≥ `MIN_LIFT`** | 簇内文档占比 ÷ 簇外文档占比 | 跨簇重复的模板词 |
+| CJK n-gram 内聚度（PMI） | 出现频率显著高于其字符独立出现的乘积 | 完全由字频解释的伪 n-gram |
+| **CJK 左右邻接熵 ≥ `MIN_BOUNDARY_ENTROPY`** | 真词的左右邻居多样，碎片近乎固定 | 边界错位碎片 |
 | 重叠去重 | 已选词的子串 / 首尾位移重叠的候选跳过 | `我们这` 与 `们这周` 同时入选 |
 
-**`GLOBAL_DF_CAP` 初值 0.05。** 原型对照过 0.05 与 0.20：0.20 会放进跨簇重复的模板词与
-英文功能词，0.05 明显更干净。但 0.05 也会误伤"在这份语料里本来就高频的真主题词"
-（小语料上尤其明显），所以它与 §4.4 的功能词表是**互为替代的两条路**——
-功能词表接管掉功能词之后，这个上限应当能放宽。
+**判据用尺度无关的 lift，不用全局文档频率的绝对上限。** 原型先试过 `GLOBAL_DF_CAP`：
+它在 757 篇语料上看着能用，其实是在拟合「簇占语料多大比例」——29 篇的簇恰好压在 5% 线下，
+换一份语料或换个簇大小就整批失效（在 12 篇的测试语料上把关键词全滤空了）。
+lift = 簇内文档占比 ÷ 簇外文档占比，对语料规模与簇大小都不敏感。
 
-实施时以 §4.5 的人工验收线为准在 0.05–0.20 之间定值，**最终值写进
-`insights.json` 的 `naming.params`**。全部常量随产物落盘，产物不隐瞒名字是怎么来的。
+**邻接熵是治 CJK 碎片的主力，PMI 不是。** 中文没有词边界，滑窗会切出
+`励模型`（奖励模型）、`合人类`（符合人类）这类边界错位的碎片——它们的字都不是功能词，
+词表和 PMI 都拦不住，但它们的左邻居几乎恒定。这是无监督分词的经典判据，无依赖、确定、
+语言无关。
+
+⚠️ **PMI 的分母必须同源**：n-gram 的概率只能在**同长度 n-gram 的总数**里算。
+早期实现拿「全部 token 数」（含 2-gram + 3-gram + 拉丁词）作分母、却拿 CJK 字符数
+算字符概率，两个概率空间不可比，PMI 被系统性压低，把 `推敲`、`造型` 这种真词也滤掉了。
+
+全部常量随产物落盘（`insights.json` 的 `naming.params`），产物不隐瞒名字是怎么来的。
 
 ### 4.4 已知失效模式（不假装解决）
 
@@ -290,15 +328,18 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
   "versions": {"kb_init": "…", "python": "…", "sklearn": "…"},
   "naming": {
     "method": "ctfidf_multiscript",
-    "params": {"top_k": 4, "global_df_cap": 0.20, "min_cluster_df": 2,
-               "max_cluster_df_ratio": 0.9, "cjk_pmi_min": 2.0,
+    "params": {"top_k": 4, "min_lift": 2.0, "min_cluster_df": 2,
+               "cjk_pmi_min_bigram": 2.0,
                "stoplist": "bundled-v1"}
   },
   "presentation": {
     "group_refs": [{"analysis_id": "topics-01", "group_id": "g02"},
                    {"analysis_id": "topics-02", "group_id": "g01s03"}],
-    "truncated": {"shown": 12, "total": 14, "omitted_group_refs": [], "omitted_docs": 0}
+    "truncated": {"shown": 12, "total": 14, "omitted_group_refs": [], "omitted_docs": 0,
+                  "unnamed_group_refs": [], "unnamed_docs": 0}
   },
+  "limits": {"topic_insight_cap": 12, "keyword_top_k": 4, "evidence_show": 3,
+             "long_orphan_min_residual": 3, "long_orphan_show": 3},
   "counts": {"topic": 10, "residual": 2, "corpus": 4, "total": 16},
   "revisit_gate": { "…见 §7…" },
   "insights": [
@@ -389,7 +430,7 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
 "revisit_gate": {
   "rules_version": "2b-1",
   "inputs": {"topic_insight_count": 10, "presentation_group_count": 10,
-             "residual_share": 0.841, "corpus_is_first_party": true},
+             "residual_share": 0.841, "corpus_provenance": "unknown"},
   "conditions": [
     {"id": "insufficient_topics",  "threshold": 4,    "observed": 10,
      "state": "not_triggered", "prescription": "subdivide"},
@@ -397,7 +438,7 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
      "state": "not_triggered", "prescription": "subdivide"},
     {"id": "residual_high",        "threshold": 0.70, "observed": 0.841,
      "state": "not_evaluable",  "prescription": "halo",
-     "reason": "requires_third_party_corpus"}
+     "reason": "corpus_provenance_unknown"}
   ]
 }
 ```
@@ -409,7 +450,11 @@ Apple Notes 落在 11，低于 12。**这不是缺陷，12 不是要靠凑数达
 是"断言恒真"的近亲。
 
 - **三态**：`triggered` / `not_triggered` / `not_evaluable`。
-  没有非本人语料就是 `not_evaluable`，不许拿本人的第二份语料冒充它通过。
+  没有第三方语料就是 `not_evaluable`，不许拿自有的第二份语料冒充它通过。
+- **`corpus_provenance` 默认 `"unknown"`，不是 `"first_party"`。**
+  工具无从知道手里这份导出属于谁；默认成 first_party 会让每一次运行都自称自有语料、
+  把这条 gate 永久禁用——**那正是它想防的自证，却由一个默认值实现了**。
+  三个取值 `unknown` / `first_party` / `third_party`，只有 `third_party` 才评估该条件。
 - **2B 只供数，不自授裁决权**：`revisit_gate` 里的 `state` 由一个纯函数按 `rules_version`
   记录的规则算出，是可复现的收据；**触发不改变任何运行时行为**，它只是让下一次人类决策有据可依。
 - `prescription` 记录的是 §2.2 那张修正后的映射，避免"条件→处方"的错配再次发生。

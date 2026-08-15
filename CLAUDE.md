@@ -11,7 +11,7 @@
 | 为什么这么设计、哪些是已裁决的 | `docs/DESIGN.md`（§4.2 验收闭环 / §4.3 IR 合同 / §5 洞察分层 / §12 链接语义 / §13 R2 验收） |
 | 当前在做的子项目 | `docs/superpowers/specs/` 最新一份 |
 
-Plan 2 拆成五块：**2A 索引**（已合并）→ **2B L2 洞察 + insights 合同** → 2D compile → 2C Wrapped → 2E L3。
+Plan 2 拆成五块：**2A 索引**（已合并）→ **2B L2 洞察 + insights 合同**（已合并，含 2A′ 过大簇细分）→ 2D compile → 2C Wrapped → 2E L3。
 
 ## 硬不变量（都是付过代价换来的，改动前先读）
 

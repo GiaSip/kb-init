@@ -32,6 +32,8 @@ def write_manifest(
     skipped_inputs: list[dict] | None = None,
     index_status: str = "skipped",
     index_reason: str | None = None,
+    insights_status: str = "skipped",
+    insights_reason: str | None = None,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -48,6 +50,10 @@ def write_manifest(
         # 事后诊断不能只靠 stderr 和退出码。
         "index_status": index_status,
         "index_reason": index_reason,
+        # 洞察层与索引层分开记：只看「有没有 insights.json」分不清
+        # skipped（没索引）/ failed（索引在但洞察挂了）/ 旧版本产物。
+        "insights_status": insights_status,
+        "insights_reason": insights_reason,
         "documents": [
             {
                 "doc_id": d.doc_id,

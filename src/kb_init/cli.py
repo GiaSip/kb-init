@@ -1,6 +1,7 @@
 import argparse
 import sys
 import zipfile
+from pathlib import Path
 
 from kb_init import __version__
 
@@ -21,12 +22,86 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="跳过索引：不下载模型、不联网，几秒拿到清洗产物",
     )
+    parser.add_argument(
+        "--corpus-provenance",
+        choices=("unknown", "first-party", "third-party"),
+        default="unknown",
+        help="这份语料属于谁：unknown（默认）/ first-party（自己的）/ "
+             "third-party（别人的）。只有 third-party 才会评估「residual 过高」"
+             "这条回头条件——工具无从自己判断，默认成 first-party 会让它永远不触发",
+    )
     parser.add_argument("source", nargs="?", help="导出文件夹或 zip 路径")
     parser.add_argument("-o", "--out", default="kb-out", help="输出目录（默认 kb-out）")
     return parser
 
 
+def _validate_command(md_path: str) -> int:
+    """`kb-init validate <insights.md>`：独立校验勾选清单与它的 json 真源。
+
+    退出码 7 而不是复用 6：6 是「这次运行的洞察没生成」，7 是「你手上这份清单
+    不合法」，下一步动作完全不同（重跑 vs 改文件）。
+    """
+    import json
+
+    from kb_init.insights_md import InsightsValidationError, validate_markdown
+
+    md = Path(md_path)
+    json_path = md.with_name("insights.json")
+    if not md.exists():
+        print(f"错误：找不到 {md}", file=sys.stderr)
+        return 7
+    if not json_path.exists():
+        print(f"错误：同目录下找不到 insights.json（{json_path}）。"
+              f"校验需要两份文件配对。", file=sys.stderr)
+        return 7
+    # 先问 manifest 这两份洞察文件算不算数。清理失败时我们刻意把半份产物留在
+    # 盘上（为了不牵连完好的清洗产物），那笔账记在 manifest 里——
+    # 读取入口不去问，这条兜底就形同虚设。
+    manifest_path = md.with_name("manifest.json")
+    try:
+        status = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )["insights_status"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # 缺失 / 损坏 / 没这个字段 / 顶层不是对象（`[]`、`null`、字符串——
+        # 下标会抛 TypeError），四种都拒绝，不「读不到就跳过」。
+        # read_index 那边已经是拒读，这里放行就等于两个入口两套标准——
+        # 而只要留一条兜底路径，规则就会被它绕过。
+        print(f"错误：读不到 {manifest_path} 里的 insights_status（{exc}），"
+              f"无法确认这两份文件算不算数。校验需要它们与 manifest 放在一起。",
+              file=sys.stderr)
+        return 7
+    if status != "complete":
+        print(f"错误：manifest 说这次运行的洞察状态是 {status!r}，不是 complete"
+              f"——这两份文件可能是残留或半成品，拒绝校验。", file=sys.stderr)
+        return 7
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        validate_markdown(md.read_text(encoding="utf-8"), payload)
+    except InsightsValidationError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 7
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"错误：读取失败——{exc}", file=sys.stderr)
+        return 7
+    print(f"校验通过：{len(payload['insights'])} 条洞察全部对得上。")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    # 不用 argparse subparsers：现有用法 `kb-init <source>` 是位置参数，
+    # 改成子命令解析会把它弄坏（下面有一条测试专盯这个）。
+    argv = sys.argv[1:] if argv is None else argv
+    # 只在「恰好两个参数、且第二个是已存在的文件」时才认作子命令。
+    # 无条件按首参数分流会让一个真叫 validate 的目录再也无法作为 source 处理
+    # ——那是拿一个合法输入名去换命令语法，代价方向反了。
+    if (len(argv) == 2 and argv[0] == "validate"
+            and Path(argv[1]).is_file()):
+        return _validate_command(argv[1])
+    if argv and argv[0] == "validate" and not Path(argv[0]).exists():
+        print("用法：kb-init validate <insights.md>", file=sys.stderr)
+        return 2
+
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -40,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
     from kb_init.pipeline import run
 
     # 退出码合同（见 README）：0 成功 / 1 输出冲突 / 2 用法错误
-    # / 3 输入不安全或损坏 / 4 I-O 失败 / 5 产物已发布但索引未完成。
+    # / 3 输入不安全或损坏 / 4 I-O 失败 / 5 产物已发布但索引未完成
+    # / 6 索引完成但洞察层未生成 / 7 validate 判定 insights.md 不合法。
     # 默认不向普通用户吐 traceback。
     try:
         counts = run(
@@ -48,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             wikilinks=args.wikilinks,
             no_index=args.no_index,
+            corpus_provenance=args.corpus_provenance.replace("-", "_"),
         )
     except FileExistsError as exc:
         print(f"错误：{exc}", file=sys.stderr)
@@ -81,6 +158,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 5
+    # 6 与 5 的恢复动作不同：5 要重跑索引（需要网络与模型），6 只差洞察层。
+    # 拓宽 5 的语义会让脚本在只需重算洞察时错误地重跑整个索引。
+    if counts.get("insights_status") == "failed":
+        print(
+            f"警告：清洗产物与索引已写入，但洞察未生成"
+            f"（{counts.get('insights_reason')}）。",
+            file=sys.stderr,
+        )
+        return 6
     return 0
 
 

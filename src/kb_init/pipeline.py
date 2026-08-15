@@ -96,6 +96,157 @@ def _versions(embedder=None) -> dict:
     }
 
 
+_INSIGHTS_FAILURE_REASONS = (
+    (ImportError, "runtime_unavailable"),
+    (OSError, "io_failed"),
+    (ValueError, "contract_violation"),
+)
+
+
+def _classify_insights_failure(exc: Exception) -> str:
+    """与 `_classify_index_failure` 同一条纪律：**必须是全函数**，任何输入都只
+    返回枚举值。它跑在 except 分支里，自己抛出就会把已发布的产物一起带走。"""
+    for exc_type, reason in _INSIGHTS_FAILURE_REASONS:
+        if isinstance(exc, exc_type):
+            return reason
+    return "naming_failed"
+
+
+def _run_insights_stage(
+    staging: Path,
+    docs: list,
+    *,
+    index_status: str,
+    corpus_provenance: str = "unknown",
+) -> tuple[str, str | None]:
+    """洞察阶段。失败必须在这里被吸收成状态——理由与索引阶段完全相同：
+    rename 之前传播出去的任何异常都会让 finally 删掉 staging，清洗产物一并消失。
+
+    调用前 staging 里已经有一份 **provisional manifest**，所以这里读 manifest
+    与读索引走的都是下游将来走的同一条路。早前的写法是给 `read_index()` 开一个
+    `trust_manifest=False` 的绕过参数——那是给公共函数装了个逃生门，
+    而这个项目的教训正是「只要留一条兜底路径，规则就会被它绕过」。
+    """
+    if index_status == "skipped":
+        return "skipped", "no_index"
+    if index_status != "complete":
+        return "skipped", "index_failed"
+
+    try:
+        from kb_init.index import read_index
+        from kb_init.insights import (
+            build_insight_set,
+            cleanup_insight_files,
+            insight_files_remain,
+            write_insights,
+        )
+        from kb_init.insights_md import render_markdown
+        from kb_init.manifest import read_manifest
+
+        # 写盘后**读回**，走公共读取器：这条路径能抓到序列化、映射与版本边界上的
+        # 问题，而 2C/2D/2E 走的正是这条路。只测内存路径的话，三个下游第一次
+        # 读文件时才会发现合同没兑现。计数与断链也从 manifest 读，不在这里手搓
+        # 一个「像 manifest 的字典」——那等于给同一份事实开了第二个来源。
+        index, _matrix = read_index(staging)
+        manifest = read_manifest(staging)
+        kept = [d for d in docs if d.status == "kept"]
+        payload = build_insight_set(
+            index,
+            manifest,
+            {d.doc_id: d.body for d in kept},
+            {d.doc_id: (d.title or "") for d in kept},
+            corpus_provenance=corpus_provenance,
+        )
+        write_insights(staging, payload, render_markdown(payload))
+        return "complete", None
+    except Exception as exc:
+        reason = _classify_insights_failure(exc)
+        # 清理路径**绝不允许把异常放出去**。放出去就会穿到 run() 的 finally，
+        # 把已经完成的清洗产物与索引一起删掉——那正是硬不变量 #2 禁止的事。
+        #
+        # 那半份洞察文件怎么办？让它留着，但把真相记在 manifest 里：
+        # `insights_status=failed` + `insights_reason=io_failed`。**manifest 才是
+        # 「哪些产物算数」的权威**，这也正是当初要有 status 字段的原因；
+        # 下游（validate / compile）读不到配对的另一半自然会 fail closed。
+        # 用「毁掉两份完好的产物」去换「删干净一份坏产物」，代价方向反了。
+        try:
+            from kb_init.insights import cleanup_insight_files, insight_files_remain
+
+            cleanup_insight_files(staging)
+            if insight_files_remain(staging):
+                reason = "io_failed"
+        except Exception:
+            reason = "io_failed"
+        return "failed", reason
+
+
+def _subdivide_flagged_groups(
+    doc_ids, matrix, assignments, method_dict, build_analysis, build_time_axis
+) -> list[dict]:
+    """2A′：把内聚度贴近 residual 基线的 group 细分成 analyses[1..]。
+
+    **细分不回头修改 `analyses[0]` 的任何字段**——2A 合同要求同时保留「第一轮的
+    residual」与「第二轮的 assigned」两套 disposition，编辑父分析会直接毁掉它。
+
+    ⚠️ 这不等于「analyses[0] 与 2A 时期逐字节相同」：本轮给 `method.params` 新增了
+    `cluster_selection_method` 与 `cohesion_lift_min`（参数必须随产物落盘）。
+    不变的是**细分这个动作**不碰父分析，不是 schema 冻结。
+
+    这个函数由 `_run_index_stage` 在它的 try 内部调用，因此异常照常向上抛，
+    由那一层吸收成 index_status=failed 并回滚整个索引子事务。
+    """
+    import numpy as np
+
+    from kb_init import subdivide as sd
+
+    if not doc_ids:
+        return []
+
+    row_of = {d: matrix[i] for i, d in enumerate(doc_ids)}
+    members_by_group: dict[str, list[str]] = {}
+    for a in assignments:
+        for m in a.memberships:
+            members_by_group.setdefault(m.group_id, []).append(a.doc_id)
+    residual_ids = [a.doc_id for a in assignments if a.disposition == "residual"]
+
+    lifts = sd.group_lifts(members_by_group, residual_ids, row_of)
+    flagged = sd.flagged_groups(lifts)
+    if not flagged:
+        return []
+
+    baseline = sd.cohesion(
+        np.vstack([row_of[d] for d in residual_ids if d in row_of])
+    )
+    extra: list[dict] = []
+    for n, gid in enumerate(flagged, start=2):
+        child_groups, child_assignments = sd.subdivide_group(
+            gid, members_by_group[gid], row_of, baseline,
+            min_cluster_size=5, min_samples=5,
+        )
+        child_method = dict(method_dict)
+        child_method["params"] = {
+            **method_dict["params"],
+            "cluster_selection_method": "leaf",
+        }
+        extra.append(
+            build_analysis(
+                analysis_id=f"topics-{n:02d}",
+                parent_analysis_id="topics-01",
+                input_scope={
+                    "kind": "parent_group",
+                    "analysis_id": "topics-01",
+                    "group_id": gid,
+                },
+                groups=child_groups,
+                assignments=child_assignments,
+                method=child_method,
+                # 子分析不重算日期覆盖率：它是全局事实，记在根分析上就够了
+                time_axis=build_time_axis(0, len(members_by_group[gid])),
+            )
+        )
+    return extra
+
+
 def _run_index_stage(
     staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str
 ) -> tuple[str, str | None]:
@@ -119,11 +270,13 @@ def _run_index_stage(
         from kb_init.cluster import Assignment, cluster_documents
         from kb_init.embed import pool_chunk_vectors
         from kb_init.index import (
+            build_analysis,
             build_index,
             build_time_axis,
             validate_index,
             write_index,
         )
+        from kb_init.subdivide import COHESION_LIFT_MIN
 
         import numpy as np
 
@@ -176,29 +329,39 @@ def _run_index_stage(
             for d in kept
             if d.date_source not in ("unknown", "unresolved") and d.created
         }
+        method_dict = {
+            "family": "density",
+            "name": "hdbscan",
+            "model": model_name,
+            "model_revision": getattr(embedder, "revision", ""),
+            "params": {
+                "min_cluster_size": 5,
+                "min_samples": 5,
+                "metric": "euclidean",
+                # 参数不落盘等于产物隐瞒了自己是怎么来的
+                "cluster_selection_method": "eom",
+                "cohesion_lift_min": COHESION_LIFT_MIN,
+            },
+            "seed": 0,
+            "splitter": splitter_meta,
+            "pooling": "mean_l2",
+            "score_kind": "density_membership",
+            "score_direction": "higher_better",
+            "decision_threshold": None,
+        }
+
+        extra_analyses = _subdivide_flagged_groups(
+            doc_ids, matrix, assignments, method_dict, build_analysis, build_time_axis
+        )
+
         index = build_index(
             run_id=run_id,
             corpus_hash=corpus_hash,
             chunks=chunks,
             groups=groups,
             assignments=assignments,
-            method={
-                "family": "density",
-                "name": "hdbscan",
-                "model": model_name,
-                "model_revision": getattr(embedder, "revision", ""),
-                "params": {
-                    "min_cluster_size": 5,
-                    "min_samples": 5,
-                    "metric": "euclidean",
-                },
-                "seed": 0,
-                "splitter": splitter_meta,
-                "pooling": "mean_l2",
-                "score_kind": "density_membership",
-                "score_direction": "higher_better",
-                "decision_threshold": None,
-            },
+            method=method_dict,
+            extra_analyses=extra_analyses,
             time_axis=build_time_axis(
                 len(dated_by_doc),
                 len(kept),
@@ -219,11 +382,14 @@ def _run_index_stage(
 
             cleanup_index_files(staging)
             if index_files_remain(staging):
-                # 回滚没干净就不能声称"只是索引没做成"——半个索引会让 2B 读到
-                # 一份说谎的产物，那比整次失败更糟。
-                raise OSError("索引半成品无法清除")
-        except ImportError:
-            pass                        # index 模块本身没导入成功，自然没有半成品
+                # 曾经在这里 `raise OSError`，理由是「半个索引比整次失败更糟」。
+                # 那条推理漏了一步：raise 会穿到 run() 的 finally，把**清洗产物**
+                # 也一起删掉——而清洗产物是完好的，用户要的正是它。
+                # 半个索引由 manifest 兜住：index_status=failed 就是「别信这些文件」，
+                # 这也正是当初要有 status 字段的原因。清理路径绝不放异常出去。
+                reason = "io_failed"
+        except Exception:
+            reason = "io_failed"
         return "failed", reason
 
 
@@ -235,7 +401,18 @@ def run(
     no_index: bool = False,
     embedder=None,
     splitter=None,
+    corpus_provenance: str = "unknown",
 ) -> dict:
+    from kb_init.insights import CORPUS_PROVENANCE
+
+    if corpus_provenance not in CORPUS_PROVENANCE:
+        # 在**入口**校验：放到洞察阶段才抛的话，它会被那一层的异常吸收器
+        # 变成 insights_status=failed，程序化调用方拿不到 ValueError。
+        raise ValueError(
+            f"corpus_provenance 只能是 {CORPUS_PROVENANCE} 之一，"
+            f"得到 {corpus_provenance!r}"
+        )
+
     source = Path(source)
     out_dir = Path(out_dir)
     run_id = run_id or uuid.uuid4().hex[:12]
@@ -322,6 +499,22 @@ def run(
                 run_id=run_id, corpus_hash=corpus_hash,
             )
 
+        # provisional manifest：让洞察阶段读索引时走**和下游一模一样**的那条路
+        # （`read_index` 总要问 manifest）。它一定会被下面的最终版覆盖，
+        # 绝不会以 pending 状态发布出去——发布只发生在最后那次 rename。
+        write_manifest(
+            docs, staging, run_id=run_id, source=str(source),
+            unresolved_links=result.unresolved_links, skipped_inputs=collisions,
+            index_status=index_status, index_reason=index_reason,
+            insights_status="pending",
+        )
+
+        insights_status, insights_reason = _run_insights_stage(
+            staging, docs,
+            index_status=index_status,
+            corpus_provenance=corpus_provenance,
+        )
+
         write_manifest(
             docs,
             staging,
@@ -331,6 +524,8 @@ def run(
             skipped_inputs=collisions,
             index_status=index_status,
             index_reason=index_reason,
+            insights_status=insights_status,
+            insights_reason=insights_reason,
         )
 
         # 返回值在 commit **之前**算好。放在 rename 之后算，一旦 summarize 抛错
@@ -338,6 +533,8 @@ def run(
         summary = summarize(docs)
         summary["index_status"] = index_status
         summary["index_reason"] = index_reason
+        summary["insights_status"] = insights_status
+        summary["insights_reason"] = insights_reason
 
         # 临时目录在 commit 前严格清掉：放到 return 时清理，一旦清理失败就会在
         # 产物已发布之后抛异常，制造"命令报错但产物已发布"；而删不干净又照常发布，

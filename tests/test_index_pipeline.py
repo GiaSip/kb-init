@@ -4,7 +4,7 @@ import pytest
 
 from kb_init.cli import main
 from kb_init.pipeline import run
-from tests.fakes import FakeEmbedder
+from tests.fakes import BlobEmbedder, FakeEmbedder
 
 LONG = "内容" * 110
 
@@ -319,3 +319,259 @@ def test_empty_corpus_does_not_touch_the_model_or_sklearn(tmp_path, monkeypatch)
 
     assert counts["index_status"] == "complete"
     assert (out / "index.json").exists()
+
+
+# ---------------- 2A′：过大簇细分接线 ----------------
+
+def _blob_corpus(tmp_path, blobs):
+    """blobs: [(标记, 篇数)]。正文里的 `blob:<标记>` 由 BlobEmbedder 解释成方向。
+
+    正文必须超过 clean.py 的 min_body_chars=200，否则整批被判空壳、kept=0，
+    测试会在一个「什么都没有」的索引上空转还全绿。
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    for marker, count in blobs:
+        for i in range(count):
+            (src / f"{marker}-{i:02d}.md").write_text(
+                f"# {marker} {i}\n\nblob:{marker}\n" + ("内容内容内容内容 " * 40),
+                encoding="utf-8")
+    return src
+
+
+def _shaped(tmp_path):
+    """两个紧致簇 + 一批各自为政的噪声 → 保证既有 group 也有 residual。"""
+    return _blob_corpus(tmp_path, [("alpha", 8), ("beta", 8), ("noise", 12)])
+
+
+def test_shaped_corpus_really_produces_groups_and_residual(tmp_path):
+    """先证明 fixture 本身有效——否则下面几条都在空索引上空转。"""
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    cov = index["analyses"][0]["coverage"]
+    assert cov["assigned"] >= 10 and cov["residual"] >= 5
+    assert len(index["analyses"][0]["groups"]) >= 2
+
+
+def test_root_method_records_its_own_selection_method_and_threshold(tmp_path):
+    """参数不落盘 = 产物隐瞒了自己是怎么来的。"""
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    params = index["analyses"][0]["method"]["params"]
+    assert params["cluster_selection_method"] == "eom"
+    assert params["cohesion_lift_min"] == 0.12
+
+
+def test_tight_groups_are_not_flagged(tmp_path):
+    """负例：形状明显的语料上不该有任何 group 被细分。"""
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert len(index["analyses"]) == 1
+
+
+def test_subdivision_appends_a_well_formed_child_analysis(tmp_path, monkeypatch):
+    """正例：强制标记一个真实存在的 group，验证细分产物结构合法。
+
+    检测逻辑本身由 test_subdivide.py 用精确几何覆盖；这里只测**接线**。
+    """
+    import kb_init.subdivide as sd
+
+    monkeypatch.setattr(sd, "flagged_groups", lambda lifts, *a, **k: sorted(lifts)[:1])
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert len(index["analyses"]) == 2, "被标记的 group 必须产出一项子分析"
+    child = index["analyses"][1]
+    assert child["parent_analysis_id"] == "topics-01"
+    assert child["input_scope"]["kind"] == "parent_group"
+    assert child["method"]["params"]["cluster_selection_method"] == "leaf"
+    # 子分析恰好覆盖父 group 成员——validate_index 已在写盘前查过，这里再钉一次
+    parent_gid = child["input_scope"]["group_id"]
+    parent_members = {
+        a["doc_id"] for a in index["analyses"][0]["assignments"]
+        for m in a["memberships"] if m["group_id"] == parent_gid
+    }
+    assert parent_members
+    assert {a["doc_id"] for a in child["assignments"]} == parent_members
+
+
+def test_index_is_deterministic_across_runs(tmp_path):
+    out_a, out_b = tmp_path / "a", tmp_path / "b"
+    src = _shaped(tmp_path)
+    run(src, out_a, embedder=BlobEmbedder(), run_id="t")
+    run(src, out_b, embedder=BlobEmbedder(), run_id="t")
+    a = json.loads((out_a / "index.json").read_text(encoding="utf-8"))
+    b = json.loads((out_b / "index.json").read_text(encoding="utf-8"))
+    assert a == b
+
+
+def test_subdivision_failure_rolls_back_the_whole_index(tmp_path, monkeypatch):
+    import kb_init.subdivide as sd
+
+    monkeypatch.setattr(sd, "flagged_groups", lambda lifts, *a, **k: sorted(lifts)[:1])
+    monkeypatch.setattr(sd, "subdivide_group",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["index_status"] == "failed"
+    assert not (out / "index.json").exists()
+    assert not (out / "index-vectors.npy").exists()
+    assert (out / "knowledge").is_dir()              # 清洗产物必须还在
+
+
+# ---------------- 2B：洞察阶段接线 ----------------
+
+def test_insights_are_published_alongside_the_index(tmp_path):
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["insights_status"] == "complete"
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    assert payload["run_id"] == "t"
+    assert payload["counts"]["total"] == len(payload["insights"])
+    assert payload["counts"]["topic"] >= 2
+    assert (out / "insights.md").exists()
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "complete"
+    assert manifest["insights_reason"] is None
+
+
+def test_insights_md_validates_against_its_own_json(tmp_path):
+    from kb_init.insights_md import validate_markdown
+
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    validate_markdown((out / "insights.md").read_text(encoding="utf-8"), payload)
+
+
+def test_insights_bind_to_the_same_corpus_hash_as_the_manifest(tmp_path):
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert payload["corpus_hash"] == manifest["corpus_hash"]
+
+
+def test_no_index_skips_insights(tmp_path):
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, no_index=True)
+    assert summary["insights_status"] == "skipped"
+    assert summary["insights_reason"] == "no_index"
+    assert not (out / "insights.json").exists()
+    assert not (out / "insights.md").exists()
+
+
+def test_index_failure_skips_insights(tmp_path):
+    from tests.fakes import BrokenEmbedder
+
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BrokenEmbedder("nan"), run_id="t")
+    assert summary["index_status"] == "failed"
+    assert summary["insights_status"] == "skipped"
+    assert summary["insights_reason"] == "index_failed"
+    assert (out / "knowledge").is_dir()
+
+
+def test_insights_failure_keeps_the_index_and_marks_status(tmp_path, monkeypatch):
+    import kb_init.insights as mod
+
+    monkeypatch.setattr(mod, "build_insight_set",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["index_status"] == "complete"
+    assert summary["insights_status"] == "failed"
+    assert summary["insights_reason"] == "naming_failed"
+    assert (out / "index.json").exists()
+    assert not (out / "insights.json").exists()
+    assert not (out / "insights.md").exists()
+
+
+def test_half_written_insights_are_rolled_back(tmp_path, monkeypatch):
+    """写 json 成功、写 md 失败 → 两个都不能留下。"""
+    from pathlib import Path as _P
+
+    real = _P.write_text
+
+    def explode(self, *a, **k):
+        if self.name == "insights.md":
+            raise OSError("写 md 失败")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(_P, "write_text", explode)
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    monkeypatch.undo()
+    assert summary["insights_status"] == "failed"
+    assert not (out / "insights.json").exists()
+    assert not (out / "insights.md").exists()
+    assert (out / "index.json").exists()
+
+
+def test_cleanup_failure_never_destroys_completed_products(tmp_path, monkeypatch):
+    """清理路径放异常出去，就会穿到 run() 的 finally 把清洗产物一起删掉。
+
+    构造：写洞察时炸 + 清理时也删不掉。断言清洗产物与索引都还在，
+    且真相记在 manifest 里（insights_status=failed / io_failed）。
+    """
+    import kb_init.insights as mod
+
+    monkeypatch.setattr(mod, "build_insight_set",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    monkeypatch.setattr(mod, "cleanup_insight_files",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("删不掉")))
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["insights_status"] == "failed"
+    assert summary["insights_reason"] == "io_failed"
+    assert (out / "knowledge").is_dir()              # 清洗产物必须还在
+    assert (out / "index.json").exists()             # 索引也是完好的
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "failed"
+
+
+def test_index_cleanup_failure_never_destroys_cleaned_output(tmp_path, monkeypatch):
+    """索引层的同一条路径（2A 遗留）。"""
+    import kb_init.index as mod
+
+    monkeypatch.setattr(mod, "cleanup_index_files",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("删不掉")))
+    from tests.fakes import BrokenEmbedder
+
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BrokenEmbedder("nan"), run_id="t")
+    assert summary["index_status"] == "failed"
+    assert summary["index_reason"] == "io_failed"
+    assert (out / "knowledge").is_dir()
+
+
+def test_run_rejects_an_illegal_provenance_at_the_entrance(tmp_path):
+    """放到洞察阶段才抛的话，会被那一层的异常吸收器变成 insights_status=failed，
+    程序化调用方永远拿不到 ValueError。"""
+    import pytest
+
+    with pytest.raises(ValueError, match="corpus_provenance"):
+        run(_shaped(tmp_path), tmp_path / "out", embedder=BlobEmbedder(),
+            run_id="t", corpus_provenance="thirdparty")
+
+
+def test_provisional_manifest_is_never_published(tmp_path):
+    """pending 只是给洞察阶段读索引用的中间态，绝不能出现在发布出去的产物里。"""
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "complete"
+
+
+def test_provisional_manifest_is_also_finalised_when_insights_fail(tmp_path, monkeypatch):
+    import kb_init.insights as mod
+
+    monkeypatch.setattr(mod, "build_insight_set",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "failed"

@@ -243,3 +243,292 @@ def test_validate_rejects_wrong_dtype_even_when_empty():
     index["chunks"] = []
     with pytest.raises(ValueError, match="float32"):
         validate_index(index, ["d1", "d2"], np.zeros((0, 0), dtype=np.float64))
+
+
+# ---------------- 2A′：多 analysis ----------------
+
+def _m():
+    return {"family": "density", "name": "hdbscan", "model": "fake",
+            "model_revision": "", "params": {"min_cluster_size": 3},
+            "seed": 0, "splitter": {"name": "injected", "max_tokens": 512,
+                                    "fallback_used": False},
+            "pooling": "mean_l2", "score_kind": "density_membership",
+            "score_direction": "higher_better", "decision_threshold": None}
+
+
+def _ta():
+    return {"dated_docs": 0, "total_docs": 3, "coverage": 0.0,
+            "threshold": 0.30, "available": False, "per_group": None}
+
+
+def _parent_parts():
+    groups = [Group("g01", "semantic_topic",
+                    {"core": 2, "halo": 0, "micro": 0, "total_docs": 2},
+                    [{"doc_id": "d1", "kind": "medoid"}])]
+    assignments = [
+        Assignment("d1", "assigned", (Membership("g01", "core", 1.0),), None),
+        Assignment("d2", "assigned", (Membership("g01", "core", 1.0),), None),
+        Assignment("d3", "residual", (), "low_local_density"),
+    ]
+    return groups, assignments
+
+
+def _child_parts():
+    groups = [Group("g01s01", "semantic_topic",
+                    {"core": 2, "halo": 0, "micro": 0, "total_docs": 2},
+                    [{"doc_id": "d1", "kind": "medoid"}])]
+    assignments = [
+        Assignment("d1", "assigned", (Membership("g01s01", "core", 1.0),), None),
+        Assignment("d2", "assigned", (Membership("g01s01", "core", 1.0),), None),
+    ]
+    return groups, assignments
+
+
+def _index_with_child(child_assignments=None, scope_group="g01", child_id="topics-02"):
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    child = build_analysis(
+        analysis_id=child_id, parent_analysis_id="topics-01",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                     "group_id": scope_group},
+        groups=cg, assignments=child_assignments if child_assignments is not None else ca,
+        method=_m(), time_axis=_ta())
+    return build_index(
+        run_id="r", corpus_hash="c", chunks=[], groups=pg, assignments=pa,
+        method=_m(), time_axis=_ta(), versions={},
+        vector_doc_ids=[], extra_analyses=[child])
+
+
+def test_extra_analysis_is_appended_and_validates():
+    index = _index_with_child()
+    assert len(index["analyses"]) == 2
+    assert index["analyses"][1]["analysis_id"] == "topics-02"
+    assert index["analyses"][1]["parent_analysis_id"] == "topics-01"
+    validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_parent_analysis_is_untouched_by_the_child():
+    index = _index_with_child()
+    parent = index["analyses"][0]
+    assert parent["coverage"] == {"assigned": 2, "ambiguous": 0, "residual": 1}
+    assert [a["doc_id"] for a in parent["assignments"]] == ["d1", "d2", "d3"]
+
+
+def test_child_must_cover_exactly_the_parent_group_members():
+    cg, ca = _child_parts()
+    index = _index_with_child(child_assignments=ca[:1])       # 少了 d2
+    with pytest.raises(ValueError, match="父 group"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_child_referencing_unknown_parent_group_is_rejected():
+    index = _index_with_child(scope_group="g99")
+    with pytest.raises(ValueError, match="不存在"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_analysis_ids_must_be_unique():
+    index = _index_with_child(child_id="topics-01")
+    with pytest.raises(ValueError, match="analysis_id"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+# ---------------- read_index：下游读取的唯一入口 ----------------
+
+def _minimal_index():
+    return build_index(run_id="r", corpus_hash="c", chunks=[], groups=[],
+                       assignments=[], method=_m(), time_axis=_ta(),
+                       versions={}, vector_doc_ids=["d1", "d2"])
+
+
+def _publish(tmp_path, matrix=None, index_status="complete"):
+    """写出一份「已发布」形态的产物：索引 + 一份说它算数的 manifest。"""
+    import json as _json
+
+    write_index(tmp_path, _minimal_index(),
+                np.eye(2, 3, dtype=np.float32) if matrix is None else matrix)
+    (tmp_path / "manifest.json").write_text(
+        _json.dumps({"index_status": index_status, "index_reason": None}),
+        encoding="utf-8")
+
+
+def test_read_index_round_trips(tmp_path):
+    from kb_init.index import read_index
+
+    _publish(tmp_path)
+    got_index, got_matrix = read_index(tmp_path)
+    assert got_index["run_id"] == "r"
+    assert got_matrix.shape == (2, 3)
+    assert got_matrix.dtype == np.float32
+
+
+def test_read_index_rejects_row_count_mismatch(tmp_path):
+    from kb_init.index import read_index
+
+    _publish(tmp_path)
+    np.save(tmp_path / "index-vectors.npy", np.eye(5, 3, dtype=np.float32))
+    with pytest.raises(ValueError, match="行数"):
+        read_index(tmp_path)
+
+
+def test_read_index_rejects_non_finite(tmp_path):
+    from kb_init.index import read_index
+
+    _publish(tmp_path)
+    bad = np.eye(2, 3, dtype=np.float32)
+    bad[0, 0] = np.nan
+    np.save(tmp_path / "index-vectors.npy", bad)
+    with pytest.raises(ValueError, match="NaN"):
+        read_index(tmp_path)
+
+
+def test_read_index_rejects_wrong_dtype(tmp_path):
+    from kb_init.index import read_index
+
+    _publish(tmp_path)
+    np.save(tmp_path / "index-vectors.npy", np.eye(2, 3, dtype=np.float64))
+    with pytest.raises(ValueError, match="float32"):
+        read_index(tmp_path)
+
+
+def test_child_must_declare_the_same_parent_as_its_scope():
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    child = build_analysis(
+        analysis_id="topics-02", parent_analysis_id="topics-99",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[], extra_analyses=[child])
+    with pytest.raises(ValueError, match="parent_analysis_id"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_child_pointing_at_itself_is_rejected():
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    child = build_analysis(
+        analysis_id="topics-02", parent_analysis_id="topics-02",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-02",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[], extra_analyses=[child])
+    with pytest.raises(ValueError, match="指向自己"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_forward_reference_to_a_later_analysis_is_rejected():
+    """指向排在自己后面的分析——这一条同时挡住循环引用。"""
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    first = build_analysis(
+        analysis_id="topics-02", parent_analysis_id="topics-03",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-03",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    second = build_analysis(
+        analysis_id="topics-03", parent_analysis_id="topics-01",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[],
+                        extra_analyses=[first, second])
+    with pytest.raises(ValueError, match="未排在它之前"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_same_parent_group_cannot_be_subdivided_twice():
+    """细分同一个父簇两次会让呈现级 group 重复计数——而重复计数没有症状。"""
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    kids = [
+        build_analysis(
+            analysis_id=f"topics-{n:02d}", parent_analysis_id="topics-01",
+            input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                         "group_id": "g01"},
+            groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+        for n in (2, 3)
+    ]
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[], extra_analyses=kids)
+    with pytest.raises(ValueError, match="两次"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_read_index_refuses_when_manifest_says_index_is_not_complete(tmp_path):
+    """「半产物由 manifest 兜住」只有在读取入口真的去问 manifest 时才成立，
+    否则那句辩护就是一张空头支票。"""
+    import json as _json
+
+    from kb_init.index import read_index
+
+    _publish(tmp_path, index_status="failed")
+    with pytest.raises(ValueError, match="complete"):
+        read_index(tmp_path)
+
+
+def test_read_index_has_no_bypass_parameter():
+    """公共读取函数上不许有绕过 manifest 的开关——那是给逃生门装了个把手，
+    而这个项目的教训是：只要留一条兜底路径，规则就会被它绕过。"""
+    import inspect
+
+    from kb_init.index import read_index
+
+    params = set(inspect.signature(read_index).parameters)
+    assert params == {"out_dir"}, params
+
+
+def test_read_index_accepts_a_complete_run(tmp_path):
+    import json as _json
+
+    from kb_init.index import read_index
+
+    _publish(tmp_path)
+    index, _ = read_index(tmp_path)
+    assert index["run_id"] == "r"
+
+
+def test_read_index_rejects_a_manifest_without_the_status_field(tmp_path):
+    import json as _json
+
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    (tmp_path / "manifest.json").write_text(_json.dumps({"run_id": "r"}),
+                                            encoding="utf-8")
+    with pytest.raises(ValueError, match="index_status"):
+        read_index(tmp_path)
+
+
+def test_read_index_rejects_a_corrupt_manifest(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    (tmp_path / "manifest.json").write_text("{ 这不是 json", encoding="utf-8")
+    with pytest.raises(ValueError, match="index_status"):
+        read_index(tmp_path)
+
+
+def test_read_index_without_a_manifest_fails_closed_with_a_clear_message(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    with pytest.raises(ValueError, match="manifest"):
+        read_index(tmp_path)

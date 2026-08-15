@@ -58,3 +58,51 @@ class BrokenEmbedder:
             if self.mode == "raise" and i == 1:
                 raise RuntimeError("推理中途炸了")
             yield fake_vector(t, self.dim)
+
+
+class BlobEmbedder:
+    """几何可控的假 embedder：按文本里的标记把向量放到指定方向上。
+
+    FakeEmbedder 的向量由 SHA-256 派生，几何形状不可控——想在管线级测试里
+    稳定造出「有簇 + 有 residual」的局面就只能碰运气。这个实现让测试自己
+    决定形状，同时仍然完全确定（jitter 也来自 hash，不用随机数）。
+
+    约定：正文里出现 `blob:<name>` 就归到 <name> 这个方向；出现 `blob:noise`
+    则每篇各自一个方向（用于制造 residual）。
+    """
+
+    def __init__(self, dim: int = 8, jitter: float = 0.01) -> None:
+        self.dim = dim
+        self.jitter = jitter
+        self.model_name = "blob"
+        self.revision = "blob-rev"
+        self._axes: dict[str, int] = {}
+
+    def _axis(self, name: str) -> int:
+        if name not in self._axes:
+            self._axes[name] = len(self._axes) % self.dim
+        return self._axes[name]
+
+    def embed(self, texts: list[str]):
+        for text in texts:
+            marker = "noise"
+            for token in text.split():
+                if token.startswith("blob:"):
+                    marker = token[len("blob:"):]
+                    break
+            vec = np.zeros(self.dim, dtype=np.float32)
+            if marker == "noise":
+                # 每篇一个自己的方向：彼此不成簇，落进 residual。
+                # **必须中心化**：uint8 全是非负数，不减 127.5 的话所有噪声向量
+                # 都挤在同一个象限里，反而会自己聚成一簇——第一版就踩了这个坑。
+                digest = hashlib.sha256(text.encode("utf-8")).digest()
+                raw = np.frombuffer(digest[: self.dim], dtype=np.uint8)
+                vec += raw.astype(np.float32) - 127.5
+            else:
+                vec[self._axis(marker)] = 1.0
+                digest = hashlib.sha256(text.encode("utf-8")).digest()
+                vec += self.jitter * (
+                    np.frombuffer(digest[: self.dim], dtype=np.uint8).astype(np.float32)
+                    / 255.0
+                )
+            yield vec / np.linalg.norm(vec)

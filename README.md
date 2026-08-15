@@ -27,9 +27,15 @@ uvx kb-init ~/Downloads/notion-export -o my-kb
 
 ```
 my-kb/
-├── knowledge/        干净的标准 Markdown（默认相对路径链接，不绑定 Obsidian）
-└── manifest.json     每篇文档的完整状态、身份、日期来源与去向
+├── knowledge/          干净的标准 Markdown（默认相对路径链接，不绑定 Obsidian）
+├── index.json          主题索引：分块、聚类归属、代表文档、时间轴条件门
+├── index-vectors.npy   文档向量矩阵（可重建的下游产物，删掉不影响可读性）
+├── insights.json       洞察真源，**不要手改**
+├── insights.md         勾选清单：只改 `[x]` / `[ ]`，正文改了不生效
+└── manifest.json       每篇文档的完整状态、身份、日期来源与去向
 ```
+
+`--no-index` 时只产出 `knowledge/` 与 `manifest.json`。
 
 `manifest.json` 里除了每篇文档的记录，还有三份账：
 
@@ -55,8 +61,25 @@ my-kb/
 | 3 | 输入不安全、损坏或不存在 |
 | 4 | 读写失败 |
 | 5 | 清洗产物已发布，但索引未完成（换一个 `--out` 目录重跑即可补上） |
+| 6 | 清洗产物与索引都在，只有洞察层没生成 |
+| 7 | `validate` 判定 `insights.md` 不合法（改文件后重跑，**不必重跑索引**） |
 
 出错时打印单行诊断，不向普通用户抛 Python traceback。
+
+5 / 6 / 7 刻意分开：三者的下一步动作完全不同——重跑索引（要网络与模型）、
+只重算洞察、改手里那份清单。合并成一个码会让脚本做多余的事。
+
+## 洞察清单怎么用
+
+`insights.md` 是一份带可见短 ID 的勾选清单。**你只应该改 `[x]` / `[ ]`**：
+
+```bash
+kb-init validate my-kb/insights.md    # 独立校验，通过返回 0
+```
+
+正文改了不会生效——下游按 ID 从 `insights.json` 取正文，不信任手改过的文案。
+ID 缺失 / 重复 / 不认识 / 跟 `insights.json` 不是同一次运行，一律报错并给出行号，
+**绝不静默少编几条**。
 
 ## 设计取舍
 
