@@ -141,3 +141,146 @@ def build_corpus_insights(manifest: dict, index: dict) -> list[Insight]:
             {"count": counts["dropped_duplicate"]})
 
     return out
+
+
+TOPIC_INSIGHT_CAP = 12
+LONG_ORPHAN_MIN_RESIDUAL = 3
+LONG_ORPHAN_SHOW = 3
+EVIDENCE_SHOW = 3
+
+_RENDERERS: dict = {}
+
+
+def _renderer(kind: str):
+    def deco(fn):
+        _RENDERERS[kind] = fn
+        return fn
+    return deco
+
+
+def render(insight: Insight) -> str:
+    """`canonical_text` 的**唯一**生成器。
+
+    payload 与 canonical_text 双载是为了让 compile 拿到的正是用户审过的那句话；
+    双载就必须有一个地方保证两者等价，就是这里。
+    """
+    return _RENDERERS[insight.kind](insight.payload)
+
+
+@_renderer("topic_cluster")
+def _render_topic(p: dict) -> str:
+    # 措辞纪律：产出的是关键词不是主题名。写成「你的主题是 X」就是产物在撒谎——
+    # 单语言簇上它给出的可能只是那门语言的通用词。
+    return (f"这 {p['doc_count']} 篇里最具区分度的词是 "
+            f"{' · '.join(p['keywords']) if p['keywords'] else '（没有足够区分度的词）'}"
+            f" — 占 kept {100 * p['share_of_kept']:.1f}%")
+
+
+@_renderer("fragment_zone")
+def _render_fragment(p: dict) -> str:
+    return f"{p['count']} 篇没有形成主题（占 kept {100 * p['share_of_kept']:.1f}%）"
+
+
+@_renderer("long_orphans")
+def _render_long_orphans(p: dict) -> str:
+    return (f"碎片区里篇幅最大的 {len(p['evidence_doc_ids'])} 篇还没长成主题"
+            f"（最长 {p['longest_chars']} 字）")
+
+
+def _with_text(insight: Insight) -> Insight:
+    return Insight(
+        insight_id=insight.insight_id,
+        family=insight.family,
+        kind=insight.kind,
+        payload=insight.payload,
+        canonical_text=render(insight),
+        evidence=insight.evidence,
+        claude_md=insight.claude_md,
+    )
+
+
+def _evidence_docs(index: dict, ref: GroupRef, members: list[str]) -> list[str]:
+    """代表优先取 medoid，不足则按 doc_id 补齐——顺序必须确定。"""
+    group = next(g for g in _analysis(index, ref[0])["groups"]
+                 if g["group_id"] == ref[1])
+    picked = [r["doc_id"] for r in group.get("representatives", [])
+              if r["doc_id"] in members]
+    for d in members:
+        if len(picked) >= EVIDENCE_SHOW:
+            break
+        if d not in picked:
+            picked.append(d)
+    return picked[:EVIDENCE_SHOW]
+
+
+def build_topic_insights(
+    index: dict, bodies: dict[str, str], titles: dict[str, str], kept_count: int
+) -> tuple[list[Insight], dict]:
+    from kb_init.keywords import extract_keywords
+
+    refs = presentation_groups(index)
+    shown = refs[:TOPIC_INSIGHT_CAP]
+    omitted = refs[TOPIC_INSIGHT_CAP:]
+
+    members_of = {ref: group_members(index, ref) for ref in refs}
+    keywords = extract_keywords(
+        bodies, {f"{a}|{g}": members_of[(a, g)] for a, g in refs}
+    )
+
+    out: list[Insight] = []
+    for n, ref in enumerate(shown, start=1):
+        members = members_of[ref]
+        evidence = _evidence_docs(index, ref, members)
+        payload = {
+            "group_ref": {"analysis_id": ref[0], "group_id": ref[1]},
+            "keywords": keywords[f"{ref[0]}|{ref[1]}"],
+            "doc_count": len(members),
+            "share_of_kept": round(len(members) / kept_count, 6) if kept_count else 0.0,
+            "evidence_doc_ids": evidence,
+            "evidence_titles": [titles.get(d, "") for d in evidence],
+        }
+        out.append(_with_text(Insight(
+            f"T{n}", "topic", "topic_cluster", payload, "",
+            {"doc_ids": evidence, "stat": None}, {"section": "focus_areas"})))
+
+    # 只写「12 个主题」而隐去遗漏，才是制造虚假完整性。截断本身不说谎。
+    truncated = {
+        "shown": len(shown),
+        "total": len(refs),
+        "omitted_group_refs": [{"analysis_id": a, "group_id": g} for a, g in omitted],
+        "omitted_docs": sum(len(members_of[r]) for r in omitted),
+    }
+    return out, truncated
+
+
+def build_residual_insights(
+    index: dict, bodies: dict[str, str], titles: dict[str, str], kept_count: int
+) -> list[Insight]:
+    residual = effective_residual_ids(index)
+    if not residual:
+        return []
+
+    out = [_with_text(Insight(
+        "R1", "residual", "fragment_zone",
+        {"count": len(residual),
+         "share_of_kept": round(len(residual) / kept_count, 6) if kept_count else 0.0},
+        "", {"doc_ids": [], "stat": {"count": len(residual)}}, None))]
+
+    # 纯按长度排序，**不做任何归属**——「这几篇贴着某个主题的边」是 halo 判断，
+    # 不落 membership 字段也仍然是软归属，那属于方案 C 的范围。
+    #
+    # 不用「长度进入前 X 分位」这种判据：residual 占 77–84% 是这类语料的常态，
+    # 分位点本身就被 residual 主导，阈值怎么取都会退化成恒真或恒假（实测两种都撞过）。
+    # 改成无阈值的「碎片区里篇幅最大的几篇」——不可能空洞，也没有魔数。
+    if len(residual) >= LONG_ORPHAN_MIN_RESIDUAL:
+        ranked = sorted(residual, key=lambda d: (-len(bodies.get(d, "")), d))
+        evidence = ranked[:LONG_ORPHAN_SHOW]
+        longest = len(bodies.get(evidence[0], ""))
+        if longest:
+            out.append(_with_text(Insight(
+                "R2", "residual", "long_orphans",
+                {"residual_count": len(residual), "longest_chars": longest,
+                 "evidence_doc_ids": evidence,
+                 "evidence_titles": [titles.get(d, "") for d in evidence]},
+                "", {"doc_ids": evidence, "stat": {"longest_chars": longest}}, None)))
+    return out

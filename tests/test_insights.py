@@ -140,3 +140,147 @@ def test_corpus_insight_ids_are_unique():
     ids = [i.insight_id for i in got]
     assert len(ids) >= 4
     assert len(set(ids)) == len(ids)
+
+
+# ---------------- topic / residual 族 ----------------
+
+from kb_init.insights import (
+    TOPIC_INSIGHT_CAP,
+    build_residual_insights,
+    build_topic_insights,
+    render,
+)
+
+
+def _corpus_index(n_groups, per_group=5, n_residual=10):
+    groups, assignments = [], []
+    for g in range(n_groups):
+        gid = f"g{g + 1:02d}"
+        groups.append(_g(gid, per_group))
+        for i in range(per_group):
+            assignments.append(_assigned(f"g{g:02d}d{i}", gid))
+    for i in range(n_residual):
+        assignments.append(_residual(f"r{i:02d}"))
+    return _index([_root(groups, assignments)])
+
+
+def _letters(tag):
+    """把 g00 / r03 这类前缀翻成纯字母。
+
+    分词器的拉丁规则要求「字母开头 + 至少两个字母」，`g00alpha` 只会切出
+    `alpha`——于是每个簇的词完全相同、lift=1，被正确滤掉。fixture 里混数字
+    是在给自己挖坑：看起来像实现坏了，其实是合成语料没有区分度。
+    """
+    return "".join(chr(ord("a") + int(c)) if c.isdigit() else c for c in tag)
+
+
+def _bodies_titles(index, long_residual=False):
+    bodies, titles = {}, {}
+    for a in index["analyses"][0]["assignments"]:
+        d = a["doc_id"]
+        mark = _letters(d[:3])
+        body = (f"{mark}alpha {mark}bravo {mark}charlie {mark}delta "
+                f"共同的背景词 ") * 8
+        if long_residual and d.startswith("r"):
+            body *= 6
+        bodies[d] = body
+        titles[d] = f"标题-{d}"
+    return bodies, titles
+
+
+def test_topic_insights_carry_keywords_evidence_and_share():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    insights, truncated = build_topic_insights(index, bodies, titles, kept_count=25)
+    assert len(insights) == 3
+    assert truncated["shown"] == 3 and truncated["total"] == 3
+    assert truncated["omitted_group_refs"] == [] and truncated["omitted_docs"] == 0
+    for ins in insights:
+        assert ins.family == "topic" and ins.kind == "topic_cluster"
+        assert ins.payload["keywords"], "关键词为空会让下面的断言恒真"
+        assert len(ins.payload["evidence_doc_ids"]) == 3
+        assert ins.payload["doc_count"] == 5
+        assert 0 < ins.payload["share_of_kept"] < 1
+        assert ins.claude_md == {"section": "focus_areas"}
+
+
+def test_evidence_docs_are_real_members_of_their_group():
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index)
+    insights, _ = build_topic_insights(index, bodies, titles, kept_count=25)
+    from kb_init.insights import group_members
+    for ins in insights:
+        ref = (ins.payload["group_ref"]["analysis_id"],
+               ins.payload["group_ref"]["group_id"])
+        members = set(group_members(index, ref))
+        assert members
+        assert set(ins.payload["evidence_doc_ids"]) <= members
+
+
+def test_topic_insights_are_capped_with_full_accounting():
+    index = _corpus_index(TOPIC_INSIGHT_CAP + 3)
+    bodies, titles = _bodies_titles(index)
+    insights, truncated = build_topic_insights(index, bodies, titles, kept_count=200)
+    assert len(insights) == TOPIC_INSIGHT_CAP
+    assert truncated["total"] == TOPIC_INSIGHT_CAP + 3
+    assert truncated["shown"] == TOPIC_INSIGHT_CAP
+    assert len(truncated["omitted_group_refs"]) == 3
+    assert truncated["omitted_docs"] == 15          # 3 组 × 5 篇，必须如实记账
+
+
+def test_residual_insight_reports_the_share():
+    index = _corpus_index(1, per_group=5, n_residual=15)
+    bodies, titles = _bodies_titles(index)
+    got = {i.kind: i for i in build_residual_insights(index, bodies, titles, 20)}
+    assert "fragment_zone" in got
+    assert got["fragment_zone"].payload["count"] == 15
+    assert got["fragment_zone"].payload["share_of_kept"] == 0.75
+
+
+def test_long_orphans_lists_the_actual_longest_residual_docs():
+    index = _corpus_index(1, per_group=5, n_residual=15)
+    bodies, titles = _bodies_titles(index)
+    bodies["r07"] = bodies["r07"] * 9            # 让某一篇明确最长
+    bodies["r03"] = bodies["r03"] * 5
+    got = {i.kind: i for i in build_residual_insights(index, bodies, titles, 20)}
+    assert "long_orphans" in got
+    p = got["long_orphans"].payload
+    assert p["evidence_doc_ids"][:2] == ["r07", "r03"]
+    assert p["longest_chars"] == len(bodies["r07"])
+    from kb_init.insights import effective_residual_ids
+    assert set(p["evidence_doc_ids"]) <= set(effective_residual_ids(index))
+
+
+def test_long_orphans_absent_when_the_fragment_zone_is_tiny():
+    index = _corpus_index(2, per_group=5, n_residual=2)
+    bodies, titles = _bodies_titles(index)
+    kinds = {i.kind for i in build_residual_insights(index, bodies, titles, 12)}
+    assert "fragment_zone" in kinds
+    assert "long_orphans" not in kinds
+
+
+def test_no_residual_insight_when_everything_is_assigned():
+    index = _corpus_index(2, per_group=5, n_residual=0)
+    bodies, titles = _bodies_titles(index)
+    assert build_residual_insights(index, bodies, titles, 10) == []
+
+
+def test_canonical_text_equals_render_of_payload():
+    """双真源的锁：payload 与 canonical_text 必须始终等价。"""
+    index = _corpus_index(3)
+    bodies, titles = _bodies_titles(index, long_residual=True)
+    topics, _ = build_topic_insights(index, bodies, titles, 25)
+    residual = build_residual_insights(index, bodies, titles, 25)
+    assert topics and residual
+    for ins in [*topics, *residual]:
+        assert ins.canonical_text
+        assert render(ins) == ins.canonical_text
+
+
+def test_topic_text_does_not_claim_to_be_a_topic_name():
+    """措辞纪律：关键词不是主题名。写成「你的主题是 X」就是产物在撒谎。"""
+    index = _corpus_index(1)
+    bodies, titles = _bodies_titles(index)
+    topics, _ = build_topic_insights(index, bodies, titles, 15)
+    assert "最具区分度的词" in topics[0].canonical_text
+    assert "你的主题是" not in topics[0].canonical_text
