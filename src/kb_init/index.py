@@ -72,6 +72,55 @@ def build_time_axis(
     }
 
 
+def build_analysis(
+    *,
+    analysis_id: str,
+    parent_analysis_id: str | None,
+    input_scope: dict,
+    groups: Sequence[Group],
+    assignments: Sequence[Assignment],
+    method: dict,
+    time_axis: dict,
+) -> dict:
+    """构造一项 analysis。根分析与子分析走同一个构造器——两处各拼一份
+    结构，迟早会长出两套不一样的形状，而形状不一致不会有任何症状。
+    """
+    dispositions = [a.disposition for a in assignments]
+    return {
+        "analysis_id": analysis_id,
+        "parent_analysis_id": parent_analysis_id,
+        "input_scope": input_scope,
+        "method": method,
+        "groups": [
+            {
+                "group_id": g.group_id,
+                "kind": g.kind,
+                "member_counts": g.member_counts,
+                "representatives": g.representatives,
+                "prototype": g.prototype,
+            }
+            for g in groups
+        ],
+        "assignments": [
+            {
+                "doc_id": a.doc_id,
+                "disposition": a.disposition,
+                "memberships": [asdict(m) for m in a.memberships],
+                "reason_code": a.reason_code,
+            }
+            for a in assignments
+        ],
+        # coverage 必须由 assignments 派生。独立计数迟早会与 assignments
+        # 漂移，而漂移后没有任何测试会发现。
+        "coverage": {
+            "assigned": dispositions.count("assigned"),
+            "ambiguous": dispositions.count("ambiguous"),
+            "residual": dispositions.count("residual"),
+        },
+        "time_axis": time_axis,
+    }
+
+
 def build_index(
     *,
     run_id: str,
@@ -83,8 +132,8 @@ def build_index(
     time_axis: dict,
     versions: dict,
     vector_doc_ids: Sequence[str],
+    extra_analyses: Sequence[dict] = (),
 ) -> dict:
-    dispositions = [a.disposition for a in assignments]
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
@@ -96,39 +145,16 @@ def build_index(
         "vector_doc_ids": list(vector_doc_ids),
         "chunks": [asdict(c) for c in chunks],
         "analyses": [
-            {
-                "analysis_id": ANALYSIS_ID,
-                "parent_analysis_id": None,
-                "input_scope": {"kind": "all_kept_docs"},
-                "method": method,
-                "groups": [
-                    {
-                        "group_id": g.group_id,
-                        "kind": g.kind,
-                        "member_counts": g.member_counts,
-                        "representatives": g.representatives,
-                        "prototype": g.prototype,
-                    }
-                    for g in groups
-                ],
-                "assignments": [
-                    {
-                        "doc_id": a.doc_id,
-                        "disposition": a.disposition,
-                        "memberships": [asdict(m) for m in a.memberships],
-                        "reason_code": a.reason_code,
-                    }
-                    for a in assignments
-                ],
-                # coverage 必须由 assignments 派生。独立计数迟早会与 assignments
-                # 漂移，而漂移后没有任何测试会发现。
-                "coverage": {
-                    "assigned": dispositions.count("assigned"),
-                    "ambiguous": dispositions.count("ambiguous"),
-                    "residual": dispositions.count("residual"),
-                },
-                "time_axis": time_axis,
-            }
+            build_analysis(
+                analysis_id=ANALYSIS_ID,
+                parent_analysis_id=None,
+                input_scope={"kind": "all_kept_docs"},
+                groups=groups,
+                assignments=assignments,
+                method=method,
+                time_axis=time_axis,
+            ),
+            *extra_analyses,
         ],
     }
 
@@ -137,25 +163,19 @@ _DISPOSITIONS = {"assigned", "ambiguous", "residual"}
 _ROLES = {"hard", "core", "halo", "micro", "member"}
 
 
-def validate_index(
-    index: dict,
-    kept_doc_ids: Sequence[str],
-    matrix: "np.ndarray | None" = None,
-    bodies: dict[str, str] | None = None,
-) -> None:
-    """合同自检。宁可在写盘前炸，也不要产出一份下游读不懂、或会说谎的索引。
+def _validate_analysis(analysis: dict, expected_doc_ids: Sequence[str]) -> None:
+    """单项 analysis 的合同自检。
 
     校验范围刻意覆盖到「结构合法但语义在撒谎」的形态——例如 residual 却带着
-    membership、representative 不属于本簇、向量行数对不上——这类问题不会让
-    任何东西崩溃，只会让 2B 悄悄算错。
+    membership、representative 不属于本簇——这类问题不会让任何东西崩溃，
+    只会让 2B 悄悄算错。
     """
-    analysis = index["analyses"][0]
     assignments = analysis["assignments"]
 
     assigned_ids = [a["doc_id"] for a in assignments]
     if len(set(assigned_ids)) != len(assigned_ids):
         raise ValueError("assignment 出现重复 doc_id")
-    if sorted(assigned_ids) != sorted(kept_doc_ids):
+    if sorted(assigned_ids) != sorted(expected_doc_ids):
         raise ValueError("每个 kept 文档必须恰有一条 assignment")
 
     known_groups = {g["group_id"] for g in analysis["groups"]}
@@ -207,6 +227,53 @@ def validate_index(
                 raise ValueError(
                     f"{g['group_id']} 的代表 {rep['doc_id']} 不是本簇成员"
                 )
+
+
+def validate_index(
+    index: dict,
+    kept_doc_ids: Sequence[str],
+    matrix: "np.ndarray | None" = None,
+    bodies: dict[str, str] | None = None,
+) -> None:
+    """合同自检。宁可在写盘前炸，也不要产出一份下游读不懂、或会说谎的索引。
+
+    根分析必须覆盖全部 kept 文档；子分析（2A′ 的过大簇细分）必须**恰好**覆盖
+    它所指向的父 group 的成员集合——多一篇少一篇都会让「呈现级 group」这个
+    派生量算错，而算错没有任何症状。
+    """
+    analyses = index["analyses"]
+    analysis_ids = [a["analysis_id"] for a in analyses]
+    if len(set(analysis_ids)) != len(analysis_ids):
+        raise ValueError("analysis_id 重复")
+
+    root = analyses[0]
+    _validate_analysis(root, sorted(kept_doc_ids))
+
+    members_by_group: dict[tuple[str, str], set[str]] = {}
+    for a in analyses:
+        for asg in a["assignments"]:
+            for m in asg["memberships"]:
+                members_by_group.setdefault(
+                    (a["analysis_id"], m["group_id"]), set()
+                ).add(asg["doc_id"])
+
+    for child in analyses[1:]:
+        scope = child["input_scope"]
+        if scope.get("kind") != "parent_group":
+            raise ValueError(f"子分析的 input_scope 必须是 parent_group：{scope}")
+        key = (scope["analysis_id"], scope["group_id"])
+        if key not in members_by_group:
+            raise ValueError(f"子分析指向不存在的父 group：{key}")
+        expected = sorted(members_by_group[key])
+        actual = sorted(a["doc_id"] for a in child["assignments"])
+        if actual != expected:
+            raise ValueError(
+                f"子分析 {child['analysis_id']} 未恰好覆盖父 group {key} 的成员"
+            )
+        _validate_analysis(child, expected)
+
+    assignments = root["assignments"]
+    assigned_ids = [a["doc_id"] for a in assignments]
 
     chunk_ids = [c["chunk_id"] for c in index["chunks"]]
     if len(set(chunk_ids)) != len(chunk_ids):

@@ -243,3 +243,93 @@ def test_validate_rejects_wrong_dtype_even_when_empty():
     index["chunks"] = []
     with pytest.raises(ValueError, match="float32"):
         validate_index(index, ["d1", "d2"], np.zeros((0, 0), dtype=np.float64))
+
+
+# ---------------- 2A′：多 analysis ----------------
+
+def _m():
+    return {"family": "density", "name": "hdbscan", "model": "fake",
+            "model_revision": "", "params": {"min_cluster_size": 3},
+            "seed": 0, "splitter": {"name": "injected", "max_tokens": 512,
+                                    "fallback_used": False},
+            "pooling": "mean_l2", "score_kind": "density_membership",
+            "score_direction": "higher_better", "decision_threshold": None}
+
+
+def _ta():
+    return {"dated_docs": 0, "total_docs": 3, "coverage": 0.0,
+            "threshold": 0.30, "available": False, "per_group": None}
+
+
+def _parent_parts():
+    groups = [Group("g01", "semantic_topic",
+                    {"core": 2, "halo": 0, "micro": 0, "total_docs": 2},
+                    [{"doc_id": "d1", "kind": "medoid"}])]
+    assignments = [
+        Assignment("d1", "assigned", (Membership("g01", "core", 1.0),), None),
+        Assignment("d2", "assigned", (Membership("g01", "core", 1.0),), None),
+        Assignment("d3", "residual", (), "low_local_density"),
+    ]
+    return groups, assignments
+
+
+def _child_parts():
+    groups = [Group("g01s01", "semantic_topic",
+                    {"core": 2, "halo": 0, "micro": 0, "total_docs": 2},
+                    [{"doc_id": "d1", "kind": "medoid"}])]
+    assignments = [
+        Assignment("d1", "assigned", (Membership("g01s01", "core", 1.0),), None),
+        Assignment("d2", "assigned", (Membership("g01s01", "core", 1.0),), None),
+    ]
+    return groups, assignments
+
+
+def _index_with_child(child_assignments=None, scope_group="g01", child_id="topics-02"):
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    child = build_analysis(
+        analysis_id=child_id, parent_analysis_id="topics-01",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                     "group_id": scope_group},
+        groups=cg, assignments=child_assignments if child_assignments is not None else ca,
+        method=_m(), time_axis=_ta())
+    return build_index(
+        run_id="r", corpus_hash="c", chunks=[], groups=pg, assignments=pa,
+        method=_m(), time_axis=_ta(), versions={},
+        vector_doc_ids=[], extra_analyses=[child])
+
+
+def test_extra_analysis_is_appended_and_validates():
+    index = _index_with_child()
+    assert len(index["analyses"]) == 2
+    assert index["analyses"][1]["analysis_id"] == "topics-02"
+    assert index["analyses"][1]["parent_analysis_id"] == "topics-01"
+    validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_parent_analysis_is_untouched_by_the_child():
+    index = _index_with_child()
+    parent = index["analyses"][0]
+    assert parent["coverage"] == {"assigned": 2, "ambiguous": 0, "residual": 1}
+    assert [a["doc_id"] for a in parent["assignments"]] == ["d1", "d2", "d3"]
+
+
+def test_child_must_cover_exactly_the_parent_group_members():
+    cg, ca = _child_parts()
+    index = _index_with_child(child_assignments=ca[:1])       # 少了 d2
+    with pytest.raises(ValueError, match="父 group"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_child_referencing_unknown_parent_group_is_rejected():
+    index = _index_with_child(scope_group="g99")
+    with pytest.raises(ValueError, match="不存在"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_analysis_ids_must_be_unique():
+    index = _index_with_child(child_id="topics-01")
+    with pytest.raises(ValueError, match="analysis_id"):
+        validate_index(index, ["d1", "d2", "d3"])
