@@ -49,4 +49,5 @@ Codex 终审用 read-only + xhigh + **量化硬预算**（分钟数 + 点名禁�
 ## 开源卫生
 
 `.superpowers/` 是 scratch 区且已 gitignore，**绝不能进历史**（报告含本机绝对路径）。
-提交前确认 `git grep "/Users/"` 无命中。
+提交前确认 `git grep "/Users/" -- ':!CLAUDE.md'` 无命中（排除本文件，否则这行自己就是命中项，
+检查永远返回脏，也就永远没人看）。
