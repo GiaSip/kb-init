@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 import numpy as np
-from sklearn.cluster import HDBSCAN
 
 MIN_DOCS_FACTOR = 2
 
@@ -81,6 +80,10 @@ def cluster_documents(
     order = sorted(range(len(doc_ids)), key=lambda i: doc_ids[i])
     sorted_ids = [doc_ids[i] for i in order]
     sorted_matrix = np.ascontiguousarray(matrix[order])
+
+    # sklearn 惰性导入：语料太小或为空时根本用不到它，而 index.py 会 import 本模块
+    # ——顶层导入会让「零文档也要写一份合法空索引」在缺 sklearn wheel 的平台上失败。
+    from sklearn.cluster import HDBSCAN
 
     # copy=True 不是为了消警告：默认的 copy=False 允许 HDBSCAN 原地改写输入矩阵，
     # 而 fit_predict 之后我们还要用同一个矩阵算 medoid——那样算出来的代表物

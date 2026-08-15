@@ -254,3 +254,68 @@ def test_provenance_reflects_injected_embedder_not_fastembed(tmp_path):
     versions = json.loads((out / "index.json").read_text(encoding="utf-8"))["versions"]
     assert "fastembed" not in versions["embedder_adapter"]
     assert {"python", "numpy", "sklearn", "kb_init"} <= set(versions)
+
+
+def test_classifier_never_raises_even_when_embed_module_is_broken(monkeypatch):
+    """异常分类器必须是全函数：它跑在 except 分支里，自己一抛就把原异常放出去了。"""
+    import builtins
+
+    from kb_init.pipeline import _classify_index_failure
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("kb_init.embed"):
+            raise ImportError("numpy 没装")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert _classify_index_failure(RuntimeError("x")) == "inference_failed"
+    assert _classify_index_failure(ImportError("y")) == "runtime_unavailable"
+    assert _classify_index_failure(FileNotFoundError("z")) == "model_unavailable"
+
+
+def test_zip_scratch_that_cannot_be_removed_aborts_before_publishing(tmp_path, monkeypatch):
+    """明文临时目录删不掉就不许发布——否则一边承诺全程本地不留痕，一边把明文留在盘上。"""
+    import shutil
+    import zipfile
+
+    src_zip = tmp_path / "corpus.zip"
+    with zipfile.ZipFile(src_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i in range(12):
+            zf.writestr(f"doc{i:02d}.md", f"# 标题{i}\n\n{LONG}第{i}篇")
+
+    real_rmtree = shutil.rmtree
+
+    def stubborn(path, *a, **k):
+        if "kb-init-" in str(path) and ".kb-init-staging" not in str(path):
+            return                      # 假装删了，其实没删
+        return real_rmtree(path, *a, **k)
+
+    monkeypatch.setattr("kb_init.pipeline.shutil.rmtree", stubborn)
+    out = tmp_path / "out"
+    with pytest.raises(OSError, match="明文残留"):
+        run(src_zip, out, run_id="zipfail", embedder=FakeEmbedder(dim=8))
+    assert not out.exists(), "删不掉明文就不能发布产物"
+
+
+def test_empty_corpus_does_not_touch_the_model_or_sklearn(tmp_path, monkeypatch):
+    """零 kept 文档时不该加载 90MB 模型，也不该让写空索引依赖 sklearn 装没装好。"""
+    import builtins
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "stub.md").write_text("# 短\n\n短", encoding="utf-8")
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("sklearn") or name == "fastembed":
+            raise ImportError(f"{name} 不该在空语料路径被导入")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    out = tmp_path / "out"
+    counts = run(src, out, run_id="empty2")
+
+    assert counts["index_status"] == "complete"
+    assert (out / "index.json").exists()

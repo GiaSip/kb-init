@@ -225,13 +225,23 @@ def validate_index(
         raise ValueError("vector_doc_ids 重复")
     if not set(vector_ids) <= known_docs:
         raise ValueError("vector_doc_ids 含未出现在 assignments 里的文档")
+    # 集合相等而非仅数量相等：数量对得上但装的是另一批 doc_id，行归属会整体错位，
+    # 而错位没有任何症状。有块的文档必然有向量，反之亦然。
+    if set(vector_ids) != {c["doc_id"] for c in index["chunks"]}:
+        raise ValueError("vector_doc_ids 与有块的文档集合不一致")
     if matrix is not None:
+        if matrix.ndim != 2:
+            raise ValueError(f"向量矩阵必须是二维，得到 {matrix.ndim} 维")
+        if matrix.dtype != np.float32:
+            raise ValueError(f"向量矩阵必须是 float32，得到 {matrix.dtype}")
         if matrix.shape[0] != len(vector_ids):
             raise ValueError(
                 f"向量行数 {matrix.shape[0]} 与 vector_doc_ids {len(vector_ids)} 不符"
             )
-        if matrix.size and (matrix.dtype != np.float32 or not np.all(np.isfinite(matrix))):
-            raise ValueError("向量矩阵必须是有限的 float32")
+        if matrix.shape[0] and matrix.shape[1] == 0:
+            raise ValueError("向量维度为零")
+        if matrix.size and not np.all(np.isfinite(matrix)):
+            raise ValueError("向量矩阵含 NaN 或 Inf")
 
 
 def write_index(out_dir: Path, index: dict, matrix: np.ndarray) -> None:

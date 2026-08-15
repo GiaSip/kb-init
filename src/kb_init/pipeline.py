@@ -35,14 +35,23 @@ def _classify_index_failure(exc: Exception) -> str:
 
     早前直接写 `type(exc).__name__`：那是实现细节，换个库、换个 Python 版本就漂移，
     而 manifest 里的 reason 是要给脚本判断用的。
-    """
-    from kb_init.embed import EmbeddingError
 
-    if isinstance(exc, EmbeddingError):
-        return "inference_failed"
+    **这个函数必须是全函数：任何输入都只返回枚举值，绝不抛异常。** 它跑在 except
+    分支里，一旦自己抛出，原异常就会穿透出去把清洗产物一起带走——而它最容易抛的
+    恰恰是 ImportError：早前它惰性导入 `EmbeddingError`，而触发它的第一现场
+    可能正是 `embed.py` 导不进来（比如缺 numpy）。所以先判内建类型，
+    再**在保护下**尝试识别自定义异常。
+    """
     for exc_type, reason in _INDEX_FAILURE_REASONS:
         if isinstance(exc, exc_type):
             return reason
+    try:
+        from kb_init.embed import EmbeddingError
+
+        if isinstance(exc, EmbeddingError):
+            return "inference_failed"
+    except Exception:
+        pass
     return "inference_failed"
 
 
@@ -116,29 +125,44 @@ def _run_index_stage(
             write_index,
         )
 
-        if splitter is None:
-            from kb_init.embed import build_splitter
-
-            splitter, splitter_meta = build_splitter()
-        else:
-            splitter_meta = {"name": "injected", "max_tokens": 512, "fallback_used": False}
-
-        if embedder is None:
-            from kb_init.embed import DEFAULT_MODEL, FastEmbedEmbedder
-
-            embedder = FastEmbedEmbedder()
-            model_name = DEFAULT_MODEL
-        else:
-            model_name = getattr(embedder, "model_name", "injected")
+        import numpy as np
 
         bodies = {d.doc_id: d.body for d in kept}
-        chunks = chunk_documents([(d.doc_id, d.body) for d in kept], splitter)
-        vectors = list(embedder.embed([bodies[c.doc_id][c.start:c.end] for c in chunks]))
-        doc_ids, matrix = pool_chunk_vectors(chunks, vectors)
-
-        groups, assignments = cluster_documents(doc_ids, matrix)
-        if not doc_ids:
+        # 空语料短路：既然没有任何文本要编码，就不该先把 90MB 模型加载起来、
+        # 也不该让「写一份合法空索引」依赖 sklearn/onnxruntime 装没装好。
+        if not kept:
+            splitter_meta = {"name": "none", "max_tokens": 512, "fallback_used": False}
+            model_name = getattr(embedder, "model_name", "none") if embedder else "none"
+            chunks, doc_ids = [], []
+            matrix = np.zeros((0, 0), dtype=np.float32)
             groups, assignments = [], []
+        else:
+            if splitter is None:
+                from kb_init.embed import build_splitter
+
+                splitter, splitter_meta = build_splitter()
+            else:
+                splitter_meta = {
+                    "name": "injected", "max_tokens": 512, "fallback_used": False
+                }
+
+            if embedder is None:
+                from kb_init.embed import DEFAULT_MODEL, FastEmbedEmbedder
+
+                embedder = FastEmbedEmbedder()
+                model_name = DEFAULT_MODEL
+            else:
+                model_name = getattr(embedder, "model_name", "injected")
+
+            chunks = chunk_documents([(d.doc_id, d.body) for d in kept], splitter)
+            vectors = list(
+                embedder.embed([bodies[c.doc_id][c.start:c.end] for c in chunks])
+            )
+            doc_ids, matrix = pool_chunk_vectors(chunks, vectors)
+            # 全部文档都切不出块时同样不必进聚类
+            groups, assignments = (
+                cluster_documents(doc_ids, matrix) if doc_ids else ([], [])
+            )
 
         # 切不出块的文档（正文为空白）拿不到向量，必须显式补一条 residual，
         # 否则「每个 kept doc 恰有一条 assignment」这条合同会被悄悄破坏。
@@ -221,10 +245,22 @@ def run(
     staging: Path | None = None
     published = False
 
-    def _discard() -> None:
-        """清理临时目录。**永不抛异常**——它会在 commit 点前后都被调用，
-        任何一次抛出都会制造"产物已发布但命令报错"。"""
-        for path in scratch:
+    def _discard_strict() -> None:
+        """commit **之前**的严格清理：删完必须复核路径确实不在了。
+
+        用户笔记的明文躺在这些临时目录里。`ignore_errors=True` 删不掉也当作删掉，
+        然后照常发布产物——那就等于一边承诺"全程本地不留痕"，一边把明文留在盘上。
+        删不掉就在 rename 之前中止，宁可整次失败。
+        """
+        for path in list(scratch):
+            shutil.rmtree(path, ignore_errors=True)
+            if path.exists():
+                raise OSError(f"临时解压目录无法删除，拒绝在明文残留的情况下发布：{path}")
+            scratch.remove(path)
+
+    def _discard_best_effort() -> None:
+        """异常路径上的兜底清理。**永不抛异常**——此时已经在处理别的失败了。"""
+        for path in list(scratch):
             shutil.rmtree(path, ignore_errors=True)
         scratch.clear()
 
@@ -303,9 +339,10 @@ def run(
         summary["index_status"] = index_status
         summary["index_reason"] = index_reason
 
-        # 临时目录在 commit 前主动清掉：放到 return 时清理，一旦清理失败就会在
-        # 产物已发布之后抛异常，制造"命令报错但产物已发布"。
-        _discard()
+        # 临时目录在 commit 前严格清掉：放到 return 时清理，一旦清理失败就会在
+        # 产物已发布之后抛异常，制造"命令报错但产物已发布"；而删不干净又照常发布，
+        # 等于把用户笔记的明文留在盘上。两者都不接受，所以在这里删并复核。
+        _discard_strict()
 
         # 发布：一次 rename。out_dir 若已存在（空目录）先移走，
         # 使 rename 目标不存在——同一文件系统内 rename 是原子的。
@@ -320,4 +357,4 @@ def run(
         # rmtree 也就不会误删已发布的产物。
         if not published and staging is not None:
             shutil.rmtree(staging, ignore_errors=True)
-        _discard()
+        _discard_best_effort()

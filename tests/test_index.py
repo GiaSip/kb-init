@@ -177,7 +177,7 @@ def test_validate_rejects_non_finite_matrix():
     index, matrix = _fixture()
     matrix = matrix.copy()
     matrix[0, 0] = np.inf
-    with pytest.raises(ValueError, match="有限的 float32"):
+    with pytest.raises(ValueError, match="NaN 或 Inf"):
         validate_index(index, ["d1", "d2"], matrix)
 
 
@@ -218,3 +218,28 @@ def test_time_axis_per_group_computed_only_when_available():
                           assignments=assignments)
     assert low["available"] is False
     assert low["per_group"] is None, "覆盖率不够时不给每簇统计，免得下游拿 1% 当整体讲"
+
+
+def test_validate_rejects_vector_doc_ids_disagreeing_with_chunks():
+    """数量对得上但装的是另一批 doc_id——行归属整体错位，且没有任何症状。"""
+    index, matrix = _fixture()
+    index["vector_doc_ids"] = ["d2", "d1"]      # 集合相同，顺序不同：应通过
+    validate_index(index, ["d1", "d2"], matrix)
+
+    index["chunks"] = [c for c in index["chunks"] if c["doc_id"] == "d1"]
+    with pytest.raises(ValueError, match="有块的文档集合不一致"):
+        validate_index(index, ["d1", "d2"], matrix)
+
+
+def test_validate_rejects_one_dimensional_matrix():
+    index, _ = _fixture()
+    with pytest.raises(ValueError, match="二维"):
+        validate_index(index, ["d1", "d2"], np.zeros(2, dtype=np.float32))
+
+
+def test_validate_rejects_wrong_dtype_even_when_empty():
+    index, _ = _fixture()
+    index["vector_doc_ids"] = []
+    index["chunks"] = []
+    with pytest.raises(ValueError, match="float32"):
+        validate_index(index, ["d1", "d2"], np.zeros((0, 0), dtype=np.float64))
