@@ -64,6 +64,8 @@ def cluster_documents(
     *,
     min_cluster_size: int = 5,
     min_samples: int = 5,
+    cluster_selection_method: str = "eom",
+    group_id_prefix: str = "g",
 ) -> tuple[list[Group], list[Assignment]]:
     doc_ids = list(doc_ids)
     if len(doc_ids) != matrix.shape[0]:
@@ -92,6 +94,9 @@ def cluster_documents(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
         metric="euclidean",
+        # 'eom' 偏好大而稳的簇，在高维 embedding 上会把整份语料吞成一个巨簇；
+        # 'leaf' 给更细的叶子级簇。选哪个不写死在这里——由调用方决定并落盘记账。
+        cluster_selection_method=cluster_selection_method,
         copy=True,
     )
     labels = model.fit_predict(sorted_matrix)
@@ -109,7 +114,7 @@ def cluster_documents(
     group_of_doc: dict[str, str] = {}
     groups: list[Group] = []
     for i, members in enumerate(ordered, start=1):
-        group_id = f"g{i:02d}"
+        group_id = f"{group_id_prefix}{i:02d}"
         for d in members:
             group_of_doc[d] = group_id
         groups.append(
