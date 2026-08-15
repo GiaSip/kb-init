@@ -22,7 +22,9 @@
 - **`analyses[0]` 一个字节都不改**（2A′ 只追加 `analyses[1]`）。
 - **断言不许恒真。** 每条"集合 A ⊆ 集合 B"型断言必须同时断言 A 非空且大小符合预期；检测器测试必须同时有正例与负例。
 - **任何链接 / 路径 / 分块类改动，验收必须跑真实语料**（Task 12）。
-- **开源卫生**：不得把真实笔记标题、`/Users/` 绝对路径写进仓库任何文件；提交前 `git grep "/Users/"` 必须无命中。
+- **开源卫生**：不得把真实笔记标题或本机家目录绝对路径写进仓库任何文件；提交前跑 CLAUDE.md
+  「开源卫生」节里那条 `git grep` 必须无命中（**本计划刻意不写出那个字面量**——写进来
+  就会让那条检查从二元判定退化成每次都要人肉甄别）。
 - 常量值（spec 已定）：`COHESION_LIFT_MIN = 0.12`、`TOPIC_INSIGHT_CAP = 12`、`INSUFFICIENT_TOPICS_THRESHOLD = 4`、`RESIDUAL_HIGH_THRESHOLD = 0.70`、`GLOBAL_DF_CAP` 初值 `0.05`、`KEYWORD_TOP_K = 4`、`MIN_CLUSTER_DF = 2`、`MAX_CLUSTER_DF_RATIO = 0.9`、`CJK_PMI_MIN_BIGRAM = 2.0`、`CJK_PMI_MIN_TRIGRAM = 3.0`。
 - 稳定枚举：`insights_reason ∈ {no_index, index_failed, contract_violation, naming_failed, io_failed}`。
 - 退出码：`0` 成功 / `1` 输出冲突 / `2` 用法错误 / `3` 输入不安全或损坏 / `4` I/O 失败 / `5` 索引未完成 / **`6` 索引完成但洞察未完成**。
@@ -3085,7 +3087,7 @@ git commit -m "test: 2B 真实语料验收 + 人工命名质量探针"
 - [ ] **Step 6: 提交前检查并 Commit**
 
 ```bash
-git grep "/Users/" -- ':!*.lock' && echo "❌ 有绝对路径" || echo "✓ 无绝对路径"
+git grep "$(printf '/Us''ers/')" && echo "❌ 有绝对路径" || echo "✓ 无绝对路径"
 .venv/bin/python -m pytest -q
 git add README.md docs/DESIGN.md STATUS.md CLAUDE.md \
         docs/superpowers/specs/2026-08-15-2a-index-layer-design.md
