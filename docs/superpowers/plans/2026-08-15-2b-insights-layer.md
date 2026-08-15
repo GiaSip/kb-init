@@ -25,7 +25,7 @@
 - **开源卫生**：不得把真实笔记标题或本机家目录绝对路径写进仓库任何文件；提交前跑 CLAUDE.md
   「开源卫生」节里那条 `git grep` 必须无命中（**本计划刻意不写出那个字面量**——写进来
   就会让那条检查从二元判定退化成每次都要人肉甄别）。
-- 常量值（spec 已定）：`COHESION_LIFT_MIN = 0.12`、`TOPIC_INSIGHT_CAP = 12`、`INSUFFICIENT_TOPICS_THRESHOLD = 4`、`RESIDUAL_HIGH_THRESHOLD = 0.70`、`GLOBAL_DF_CAP` 初值 `0.05`、`KEYWORD_TOP_K = 4`、`MIN_CLUSTER_DF = 2`、`MAX_CLUSTER_DF_RATIO = 0.9`、`CJK_PMI_MIN_BIGRAM = 2.0`、`CJK_PMI_MIN_TRIGRAM = 3.0`。
+- 常量值（spec 已定）：`COHESION_LIFT_MIN = 0.12`、`TOPIC_INSIGHT_CAP = 12`、`INSUFFICIENT_TOPICS_THRESHOLD = 4`、`RESIDUAL_HIGH_THRESHOLD = 0.70`、`MIN_LIFT = 2.0`、`KEYWORD_TOP_K = 4`、`MIN_CLUSTER_DF = 2`、`CJK_PMI_MIN_BIGRAM = 2.0`、`CJK_PMI_MIN_TRIGRAM = 3.0`、`CJK_MIN_BOUNDARY_ENTROPY = 0.4`。
 - 稳定枚举：`insights_reason ∈ {no_index, index_failed, contract_violation, naming_failed, io_failed}`。
 - 退出码：`0` 成功 / `1` 输出冲突 / `2` 用法错误 / `3` 输入不安全或损坏 / `4` I/O 失败 / `5` 索引未完成 / **`6` 索引完成但洞察未完成**。
 - 跑测试：`.venv/bin/python -m pytest -q`
@@ -1201,6 +1201,20 @@ def test_params_are_exposed_for_recording():
 
 Run: `.venv/bin/python -m pytest tests/test_keywords.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'kb_init.keywords'`
+
+> **⚠️ 实施偏离（2026-08-15 TDD 中发现，已落地）**
+> 下面这版代码里的两个过滤器在真实语料上被证伪，实现最终与此不同，以
+> `src/kb_init/keywords.py` 为准：
+> 1. `global_df_cap`（全局文档频率绝对上限）**已删除**，换成尺度无关的
+>    `min_lift`（簇内文档占比 ÷ 簇外文档占比）。绝对上限看着能用，其实是在拟合
+>    「簇占语料多大比例」——29 篇的簇在 757 篇语料里恰好压在 5% 线下，
+>    换到 12 篇的测试语料上它把关键词全滤空了。
+> 2. 新增 `cjk_min_boundary_entropy`（CJK 左右邻接熵）。`励模型`（奖励模型）、
+>    `合人类`（符合人类）这类边界错位碎片的字都不是功能词，词表和 PMI 都拦不住，
+>    但它们的左邻居近乎恒定。
+> 3. PMI 的分母修了一个真 bug：n-gram 概率必须在**同长度 n-gram 总数**里算，
+>    早期版本拿「全部 token 数」当分母、却拿 CJK 字符数算字符概率，
+>    两个概率空间不可比，把 `推敲`、`造型` 这种真词也滤掉了。
 
 - [ ] **Step 3: 最小实现**
 
@@ -2970,8 +2984,9 @@ Expected: 语料在本机则 FAIL（尚未跑通真实数据）；不在则 SKIP
 
 1. `topic` 条数与预期不符 → 检查 `presentation_groups` 的父簇替换逻辑（Task 9）。
 2. Apple Notes 出现被标记的 group → 检测器阈值或 residual 基线取错（Task 1）。
-3. 关键词为空 → `global_df_cap` 太紧（Task 8），按 spec §4.3 在 0.05–0.20 间调，
-   **并把最终值写回 `DEFAULT_PARAMS`**，让它随产物落盘。
+3. 关键词为空 → 先看是 `min_lift` 太高还是 CJK 邻接熵门槛太高（Task 8）。
+   **注意别拿退化的合成语料判过滤器**：同一句重复 N 遍时每个 n-gram 只有一个
+   固定邻居、熵恒为 0，会把工作正常的边界过滤器判成坏的。
 
 再写人工验收探针（**不进 CI**，输出含真实标题，只在本机看）：
 
