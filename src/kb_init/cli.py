@@ -22,6 +22,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="跳过索引：不下载模型、不联网，几秒拿到清洗产物",
     )
+    parser.add_argument(
+        "--corpus-provenance",
+        choices=("unknown", "first-party", "third-party"),
+        default="unknown",
+        help="这份语料属于谁：unknown（默认）/ first-party（自己的）/ "
+             "third-party（别人的）。只有 third-party 才会评估「residual 过高」"
+             "这条回头条件——工具无从自己判断，默认成 first-party 会让它永远不触发",
+    )
     parser.add_argument("source", nargs="?", help="导出文件夹或 zip 路径")
     parser.add_argument("-o", "--out", default="kb-out", help="输出目录（默认 kb-out）")
     return parser
@@ -95,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             args.out,
             wikilinks=args.wikilinks,
             no_index=args.no_index,
+            corpus_provenance=args.corpus_provenance.replace("-", "_"),
         )
     except FileExistsError as exc:
         print(f"错误：{exc}", file=sys.stderr)

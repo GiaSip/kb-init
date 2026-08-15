@@ -145,3 +145,32 @@ def test_a_directory_literally_named_validate_is_still_processable(tmp_path, mon
     (src / "a.md").write_text("# a\n\n" + "内容内容内容 " * 60, encoding="utf-8")
     assert main(["validate", "-o", str(tmp_path / "out"), "--no-index"]) == 0
     assert (tmp_path / "out" / "knowledge").is_dir()
+
+
+def test_corpus_provenance_flag_reaches_the_gate(tmp_path):
+    """provenance 只换了默认值、调用方从不传的话，条件③永远 not_evaluable，
+    那个机制就只是摆设。"""
+    import json
+
+    from kb_init.cli import main
+
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(14):
+        (src / f"d{i:02d}.md").write_text(
+            f"# 标题{i}\n\nblob:alpha\n" + ("内容内容内容内容 " * 40), encoding="utf-8")
+    out = tmp_path / "out"
+    import kb_init.pipeline as pl
+    from tests.fakes import BlobEmbedder
+
+    real_run = pl.run
+    pl.run = lambda *a, **k: real_run(*a, **{**k, "embedder": BlobEmbedder()})
+    try:
+        assert main([str(src), "-o", str(out), "--corpus-provenance", "third-party"]) == 0
+    finally:
+        pl.run = real_run
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    gate = payload["revisit_gate"]
+    assert gate["inputs"]["corpus_provenance"] == "third_party"
+    states = {c["id"]: c["state"] for c in gate["conditions"]}
+    assert states["residual_high"] != "not_evaluable"

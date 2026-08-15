@@ -111,10 +111,12 @@ def test_sections_are_grouped_by_family_with_counts():
 def test_truncation_is_disclosed_in_the_checklist():
     payload = _payload(presentation={"group_refs": [],
                                      "truncated": {"shown": 12, "total": 15,
-                                                   "omitted_group_refs": [],
-                                                   "omitted_docs": 41}})
+                                                   "omitted_group_refs": [{}, {}, {}],
+                                                   "omitted_docs": 41,
+                                                   "unnamed_group_refs": [],
+                                                   "unnamed_docs": 0}})
     md = render_markdown(payload)
-    assert "前 12" in md and "共 15" in md and "41 篇" in md
+    assert "列出 12 个" in md and "共 15 个主题" in md and "41 篇" in md
 
 
 def test_multiline_titles_do_not_break_the_line_format():
@@ -154,3 +156,30 @@ def test_a_genuinely_deleted_line_still_reports_as_missing():
                    if "`C1`" not in line)
     with pytest.raises(InsightsValidationError, match="缺少"):
         validate_markdown(md, _payload())
+
+
+def test_unnamed_and_omitted_groups_are_disclosed_separately():
+    """两类未列出的原因不同，合成一个数字会说出「未列出 2 个覆盖 0 篇」这种
+    自相矛盾的话——那正是虚假完整性的另一种形态。"""
+    payload = _payload(presentation={"group_refs": [],
+                                     "truncated": {"shown": 12, "total": 15,
+                                                   "omitted_group_refs": [{}, {}],
+                                                   "omitted_docs": 41,
+                                                   "unnamed_group_refs": [{}],
+                                                   "unnamed_docs": 7}})
+    md = render_markdown(payload)
+    assert "共 15 个主题" in md and "列出 12 个" in md
+    assert "2 个因超出展示上限未列出，覆盖 41 篇" in md
+    assert "1 个抽不出有区分度的关键词" in md and "7 篇" in md
+
+
+def test_only_unnamed_groups_still_reads_coherently():
+    payload = _payload(presentation={"group_refs": [],
+                                     "truncated": {"shown": 0, "total": 2,
+                                                   "omitted_group_refs": [],
+                                                   "omitted_docs": 0,
+                                                   "unnamed_group_refs": [{}, {}],
+                                                   "unnamed_docs": 10}})
+    md = render_markdown(payload)
+    assert "超出展示上限" not in md          # 没有这一类就别提
+    assert "2 个抽不出有区分度的关键词" in md

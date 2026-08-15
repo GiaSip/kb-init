@@ -119,6 +119,7 @@ def _run_insights_stage(
     counts: dict,
     unresolved_links: list,
     index_status: str,
+    corpus_provenance: str = "unknown",
 ) -> tuple[str, str | None]:
     """洞察阶段。失败必须在这里被吸收成状态——理由与索引阶段完全相同：
     rename 之前传播出去的任何异常都会让 finally 删掉 staging，清洗产物一并消失。
@@ -151,6 +152,7 @@ def _run_insights_stage(
             {"counts": counts, "unresolved_links": unresolved_links, "documents": []},
             {d.doc_id: d.body for d in kept},
             {d.doc_id: (d.title or "") for d in kept},
+            corpus_provenance=corpus_provenance,
         )
         write_insights(staging, payload, render_markdown(payload))
         return "complete", None
@@ -396,6 +398,7 @@ def run(
     no_index: bool = False,
     embedder=None,
     splitter=None,
+    corpus_provenance: str = "unknown",
 ) -> dict:
     source = Path(source)
     out_dir = Path(out_dir)
@@ -488,6 +491,7 @@ def run(
             counts=summarize(docs),
             unresolved_links=result.unresolved_links,
             index_status=index_status,
+            corpus_provenance=corpus_provenance,
         )
 
         write_manifest(

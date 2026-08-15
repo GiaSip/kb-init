@@ -60,13 +60,24 @@ def render_markdown(payload: dict) -> str:
 
     truncated = (payload.get("presentation") or {}).get("truncated") or {}
     if truncated and truncated.get("shown") != truncated.get("total"):
-        # 只写「12 个主题」而隐去遗漏，才是制造虚假完整性
-        lines += [
-            f"> ⚠️ 主题按篇数展示前 {truncated['shown']} 个，共 {truncated['total']} 个；"
-            f"未列出的 {truncated['total'] - truncated['shown']} 个覆盖 "
-            f"{truncated['omitted_docs']} 篇（完整清单见 insights.json）。",
-            "",
-        ]
+        # 只写「12 个主题」而隐去遗漏，才是制造虚假完整性。
+        # 「因超出上限没列」与「抽不出关键词没列」是两回事，合成一个数字会
+        # 说出「未列出 2 个覆盖 0 篇」这种自相矛盾的话。
+        omitted_n = len(truncated.get("omitted_group_refs") or [])
+        unnamed_n = len(truncated.get("unnamed_group_refs") or [])
+        parts = [f"> ⚠️ 共 {truncated['total']} 个主题，这里列出 {truncated['shown']} 个。"]
+        if omitted_n:
+            parts.append(
+                f"另有 {omitted_n} 个因超出展示上限未列出，覆盖 "
+                f"{truncated.get('omitted_docs', 0)} 篇。"
+            )
+        if unnamed_n:
+            parts.append(
+                f"另有 {unnamed_n} 个抽不出有区分度的关键词、无法命名，覆盖 "
+                f"{truncated.get('unnamed_docs', 0)} 篇。"
+            )
+        parts.append("完整清单见 insights.json。")
+        lines += ["".join(parts), ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
