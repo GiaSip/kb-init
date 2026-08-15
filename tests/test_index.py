@@ -29,6 +29,7 @@ def _fixture():
                 "score_direction": "higher_better", "decision_threshold": None},
         time_axis=build_time_axis(1, 2),
         versions={"kb_init": "0.2.0"},
+        vector_doc_ids=["d1", "d2"],
     )
     return index, np.eye(2, 4, dtype=np.float32)
 
@@ -68,8 +69,8 @@ def test_coverage_is_derived_from_assignments():
 
 
 def test_validate_accepts_a_well_formed_index():
-    index, _ = _fixture()
-    validate_index(index, ["d1", "d2"])
+    index, matrix = _fixture()
+    validate_index(index, ["d1", "d2"], matrix)
 
 
 def test_validate_rejects_doc_without_assignment():
@@ -127,3 +128,93 @@ def test_write_index_leaves_nothing_behind_when_json_write_fails(tmp_path, monke
     with pytest.raises(OSError):
         write_index(tmp_path, index, matrix)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_validate_rejects_residual_carrying_membership():
+    """结构合法但语义撒谎：标 residual 却带着 membership。"""
+    index, _ = _fixture()
+    a = index["analyses"][0]["assignments"][1]
+    a["memberships"] = [{"group_id": "g01", "role": "core", "score": 0.5}]
+    with pytest.raises(ValueError, match="residual 却带着"):
+        validate_index(index, ["d1", "d2"])
+
+
+def test_validate_rejects_assigned_without_membership():
+    index, _ = _fixture()
+    index["analyses"][0]["assignments"][0]["memberships"] = []
+    with pytest.raises(ValueError, match="assigned 却没有"):
+        validate_index(index, ["d1", "d2"])
+
+
+def test_validate_rejects_illegal_role_and_score():
+    index, _ = _fixture()
+    index["analyses"][0]["assignments"][0]["memberships"][0]["role"] = "bogus"
+    with pytest.raises(ValueError, match="非法 role"):
+        validate_index(index, ["d1", "d2"])
+
+    index, _ = _fixture()
+    index["analyses"][0]["assignments"][0]["memberships"][0]["score"] = float("nan")
+    with pytest.raises(ValueError, match="有限数"):
+        validate_index(index, ["d1", "d2"])
+
+
+def test_validate_rejects_representative_outside_its_group():
+    index, _ = _fixture()
+    index["analyses"][0]["groups"][0]["representatives"] = [
+        {"doc_id": "d2", "kind": "medoid"}
+    ]
+    with pytest.raises(ValueError, match="不是本簇成员"):
+        validate_index(index, ["d1", "d2"])
+
+
+def test_validate_rejects_vector_row_count_mismatch():
+    index, _ = _fixture()
+    with pytest.raises(ValueError, match="向量行数"):
+        validate_index(index, ["d1", "d2"], np.eye(5, 4, dtype=np.float32))
+
+
+def test_validate_rejects_non_finite_matrix():
+    index, matrix = _fixture()
+    matrix = matrix.copy()
+    matrix[0, 0] = np.inf
+    with pytest.raises(ValueError, match="有限的 float32"):
+        validate_index(index, ["d1", "d2"], matrix)
+
+
+def test_validate_rejects_chunk_offset_out_of_range():
+    index, _ = _fixture()
+    with pytest.raises(ValueError, match="越界"):
+        validate_index(index, ["d1", "d2"], None, {"d1": "ab", "d2": "abcd"})
+
+
+def test_validate_rejects_duplicate_chunk_ids():
+    index, _ = _fixture()
+    index["chunks"][1]["chunk_id"] = index["chunks"][0]["chunk_id"]
+    with pytest.raises(ValueError, match="chunk_id 重复"):
+        validate_index(index, ["d1", "d2"])
+
+
+def test_time_axis_per_group_computed_only_when_available():
+    from kb_init.cluster import Assignment, Group, Membership
+
+    groups = [Group("g01", "semantic_topic",
+                    {"core": 2, "halo": 0, "micro": 0, "total_docs": 2},
+                    [{"doc_id": "d1", "kind": "medoid"}])]
+    assignments = [
+        Assignment("d1", "assigned", (Membership("g01", "core", 0.9),), None),
+        Assignment("d2", "assigned", (Membership("g01", "core", 0.8),), None),
+    ]
+    dates = {"d1": "2024-03-01", "d2": "2025-06-30"}
+
+    high = build_time_axis(2, 2, dates_by_doc=dates, groups=groups,
+                           assignments=assignments)
+    assert high["available"] is True
+    assert high["per_group"] == [
+        {"group_id": "g01", "dated_docs": 2, "total_docs": 2,
+         "earliest": "2024-03-01", "latest": "2025-06-30"}
+    ]
+
+    low = build_time_axis(1, 100, dates_by_doc=dates, groups=groups,
+                          assignments=assignments)
+    assert low["available"] is False
+    assert low["per_group"] is None, "覆盖率不够时不给每簇统计，免得下游拿 1% 当整体讲"

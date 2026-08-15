@@ -96,6 +96,12 @@ class TokenSafeSplitter:
                     else:
                         high = mid - 1
                 hi = lo
+                if self._count(text[pos:hi]) > self._max_tokens:
+                    # 连一个字符都放不下。切不动就必须报出来——默默放行等于
+                    # 又一次静默截断，而躲开静默截断正是这个类存在的理由。
+                    raise ValueError(
+                        f"单个字符的 token 数已超过上限 {self._max_tokens}（位置 {pos}）"
+                    )
             spans.append((pos, hi))
             pos = hi
         return spans
@@ -121,6 +127,12 @@ def build_splitter(model_name: str = DEFAULT_MODEL):
 
         def count(text: str) -> int:
             return len(tokenizer.encode(text).ids)
+
+        # 关完还要**验一次**：`no_truncation()` 不存在或没生效时，计数会恒 ≤ 上限，
+        # token-safe 就成了一句空话，而所有断言都会恒真、测不出来。
+        # 探针取一段远超上限的文本；若它的计数没超限，说明还在截断。
+        if count("x " * (MAX_TOKENS * 3)) <= MAX_TOKENS:
+            raise RuntimeError("tokenizer 的 truncation 关不掉，计数不可信")
 
         return (
             TokenSafeSplitter(count, MAX_TOKENS),
@@ -174,6 +186,15 @@ class FastEmbedEmbedder:
         self._progress = progress
         self._model = None
         self.revision = ""
+
+    @property
+    def provenance(self) -> str:
+        """自报家门，供 `index.json` 的 `versions.embedder_adapter` 使用。
+
+        由适配器自己提供，而不是让 pipeline 猜：注入假实现时如果仍写 fastembed，
+        产物就在撒谎；反过来，管线自建的真适配器被记成 injected 也一样是错的。
+        """
+        return _fastembed_version()
 
     def _ensure(self):
         if self._model is None:

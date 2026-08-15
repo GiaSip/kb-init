@@ -168,3 +168,89 @@ def test_docs_without_chunks_still_get_an_assignment(tmp_path):
     assigned = [a["doc_id"] for a in index["analyses"][0]["assignments"]]
     assert sorted(assigned) == sorted(kept)
     assert counts["index_status"] == "complete"
+
+
+def test_index_import_failure_still_publishes_cleaned_output(tmp_path, monkeypatch):
+    """索引专属依赖导入失败（如平台缺 sklearn wheel）也必须被吸收。
+
+    这是 R15 点名的跨平台风险：导入若在窄 try 之外，异常会穿透到 ExitStack，
+    staging 被删，清洗产物一起消失——而那正是退出码 5 承诺不会发生的事。
+    """
+    import builtins
+
+    src = tmp_path / "src"
+    _corpus(src)
+    out = tmp_path / "out"
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "sklearn.cluster" or name.startswith("kb_init.cluster"):
+            raise ImportError("平台缺 sklearn wheel")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    counts = run(src, out, run_id="imp", embedder=FakeEmbedder(dim=8))
+
+    assert counts["index_status"] == "failed"
+    assert counts["index_reason"] == "runtime_unavailable"
+    assert (out / "knowledge").is_dir() and any((out / "knowledge").iterdir())
+
+
+def test_reason_codes_are_stable_identifiers_not_exception_names(tmp_path):
+    """reason 必须是稳定枚举值，异常类名会随实现细节漂移。"""
+    src = tmp_path / "src"
+    _corpus(src)
+
+    class Exploding:
+        model_name = "x"
+
+        def embed(self, texts):
+            raise RuntimeError("推理炸了")
+
+    counts = run(src, tmp_path / "out", run_id="rc", embedder=Exploding())
+    assert counts["index_reason"] == "inference_failed"
+
+
+def test_empty_corpus_still_writes_a_valid_index(tmp_path):
+    """零 kept 文档不能是「complete 但没有 index 文件」——那是说谎的状态。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "stub.md").write_text("# 短\n\n短", encoding="utf-8")
+    out = tmp_path / "out"
+    counts = run(src, out, run_id="empty", embedder=FakeEmbedder(dim=8))
+
+    assert counts["kept"] == 0
+    assert counts["index_status"] == "complete"
+    assert (out / "index.json").exists(), "complete 就必须有 index 文件"
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    assert index["analyses"][0]["assignments"] == []
+    assert index["vector_doc_ids"] == []
+
+
+def test_vector_rows_are_explicitly_mapped_to_doc_ids(tmp_path):
+    """行序不能只靠约定：显式记 vector_doc_ids，且必须与矩阵行数一致。"""
+    import numpy as np
+
+    src = tmp_path / "src"
+    _corpus(src)
+    (src / "blank.md").write_text("# 空白\n\n" + " " * 400, encoding="utf-8")
+    out = tmp_path / "out"
+    run(src, out, run_id="vecmap", embedder=FakeEmbedder(dim=8))
+
+    index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+    matrix = np.load(out / "index-vectors.npy")
+    assert len(index["vector_doc_ids"]) == matrix.shape[0]
+    # 切不出块的文档有 assignment 但没有向量行——两者数量本就可以不等
+    assigned = {a["doc_id"] for a in index["analyses"][0]["assignments"]}
+    assert set(index["vector_doc_ids"]) <= assigned
+
+
+def test_provenance_reflects_injected_embedder_not_fastembed(tmp_path):
+    """注入假 embedder 时不能仍在产物里声称用的是 fastembed。"""
+    src = tmp_path / "src"
+    _corpus(src)
+    out = tmp_path / "out"
+    run(src, out, run_id="prov", embedder=FakeEmbedder(dim=8))
+    versions = json.loads((out / "index.json").read_text(encoding="utf-8"))["versions"]
+    assert "fastembed" not in versions["embedder_adapter"]
+    assert {"python", "numpy", "sklearn", "kb_init"} <= set(versions)

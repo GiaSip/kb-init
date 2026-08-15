@@ -82,3 +82,23 @@ def test_group_ids_do_not_reuse_hdbscan_raw_labels():
     ids, m = _two_blobs()
     groups, _ = cluster_documents(ids, m, min_cluster_size=5, min_samples=3)
     assert [g.group_id for g in groups] == ["g01", "g02"]
+
+
+def test_duplicate_doc_ids_are_rejected():
+    """排序键必须唯一，否则「打乱输入结果不变」的保证不成立。"""
+    import pytest
+
+    m = np.eye(4, 8, dtype=np.float32)
+    with pytest.raises(ValueError, match="重复"):
+        cluster_documents(["d1", "d1", "d2", "d3"], m, min_cluster_size=2, min_samples=1)
+
+
+def test_permutation_invariance_compares_full_objects():
+    """只比 doc_id/disposition/group_id 不够——role、score、reason_code 也必须一致。"""
+    ids, m = _two_blobs()
+    g1, a1 = cluster_documents(ids, m, min_cluster_size=5, min_samples=3)
+    order = np.random.default_rng(11).permutation(len(ids))
+    g2, a2 = cluster_documents([ids[i] for i in order], m[order],
+                               min_cluster_size=5, min_samples=3)
+    assert g1 == g2
+    assert sorted(a1, key=lambda a: a.doc_id) == sorted(a2, key=lambda a: a.doc_id)

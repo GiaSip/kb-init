@@ -69,6 +69,10 @@ def cluster_documents(
     doc_ids = list(doc_ids)
     if len(doc_ids) != matrix.shape[0]:
         raise ValueError(f"doc_id 数 {len(doc_ids)} 与矩阵行数 {matrix.shape[0]} 不符")
+    if len(set(doc_ids)) != len(doc_ids):
+        # 排序键必须唯一，否则下面「先排序再聚类」给出的顺序不确定，
+        # 「打乱输入结果不变」这条保证也就不成立了。
+        raise ValueError("doc_ids 存在重复")
     if len(doc_ids) < min_cluster_size * MIN_DOCS_FACTOR:
         return [], _all_residual(doc_ids, "corpus_too_small")
 

@@ -91,3 +91,34 @@ def test_real_model_smoke():
     for start, end in zh_spans:
         assert len(tokenizer.encode(long_chinese[start:end]).ids) <= MAX_TOKENS
     assert "".join(long_chinese[s:e] for s, e in zh_spans) == long_chinese
+
+
+def test_splitter_raises_when_a_single_character_exceeds_the_limit():
+    """单字符都放不下时必须显式报错——静默放行就是又一次静默截断。"""
+    splitter = TokenSafeSplitter(count_tokens=lambda s: len(s) * 1000, max_tokens=10)
+    with pytest.raises(ValueError, match="单个字符"):
+        splitter.split("abc")
+
+
+def test_build_splitter_falls_back_when_truncation_cannot_be_disabled(monkeypatch):
+    """关不掉 truncation 就不能自称 token-safe——计数会恒 ≤ 上限，等于没在计数。"""
+    import types
+
+    class CappedTokenizer:
+        """模拟一个关不掉截断的 tokenizer：编码结果永远被截到 8 个 token。"""
+
+        def encode(self, text):
+            return types.SimpleNamespace(ids=[0] * min(len(text), 8))
+
+    class FakeModel:
+        tokenizer = CappedTokenizer()
+
+    class FakeTextEmbedding:
+        def __init__(self, model_name=None):
+            self.model = FakeModel()
+
+    fake_module = types.SimpleNamespace(TextEmbedding=FakeTextEmbedding)
+    monkeypatch.setitem(sys.modules, "fastembed", fake_module)
+
+    splitter, meta = build_splitter()
+    assert meta["fallback_used"] is True, "关不掉截断时必须如实标记为降级"
