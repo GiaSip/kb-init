@@ -73,8 +73,7 @@ def effective_residual_ids(index: dict) -> list[str]:
     residual，它们就是真的没有主题。定义必须挂在 presentation_groups 上，
     两个函数才不会各说各话。
 
-    analyses[0] 一个字节都没改——「折回 residual」是这里派生出来的，
-    不是回头去编辑第一轮的结果。
+    细分动作不回头编辑 analyses[0]——「折回 residual」是这里派生出来的。
     """
     root = index["analyses"][0]
     all_kept = {a["doc_id"] for a in root["assignments"]}
@@ -88,7 +87,9 @@ def _pct(part: int, whole: int) -> str:
     return f"{(100 * part / whole):.1f}%" if whole else "0.0%"
 
 
-def build_corpus_insights(manifest: dict, index: dict) -> list[Insight]:
+def build_corpus_insights(
+    manifest: dict, index: dict, bodies: dict[str, str] | None = None
+) -> list[Insight]:
     """语料层事实。条件不成立的一律不产出——不给「你有 0 篇重复文档」这种条目。
 
     全部 claude_md=None：留存率、断链数对 agent 无用，进 CLAUDE.md 只是噪音。
@@ -98,18 +99,18 @@ def build_corpus_insights(manifest: dict, index: dict) -> list[Insight]:
     out: list[Insight] = []
     seq = 0
 
-    def add(kind: str, payload: dict, text: str, stat: dict) -> None:
+    def add(kind: str, payload: dict, stat: dict) -> None:
+        """正文一律由 render() 生成——手写一份就等于给 canonical_text 开了第二个
+        生成器，双真源立刻失去意义（Codex 终审抓到的第 4 条）。"""
         nonlocal seq
         seq += 1
-        out.append(Insight(f"C{seq}", "corpus", kind, payload, text,
-                           {"doc_ids": [], "stat": stat}, None))
+        out.append(_with_text(Insight(f"C{seq}", "corpus", kind, payload, "",
+                                      {"doc_ids": [], "stat": stat}, None)))
 
     total, kept = counts["total"], counts["kept"]
     add("retention",
         {"total": total, "kept": kept, "dropped_stub": counts["dropped_stub"],
          "dropped_duplicate": counts["dropped_duplicate"]},
-        f"读入 {total} 篇，留下 {kept} 篇（{_pct(kept, total)}）；"
-        f"{counts['dropped_stub']} 篇是空壳",
         {"total": total, "kept": kept})
 
     time_axis = root["time_axis"]
@@ -118,9 +119,6 @@ def build_corpus_insights(manifest: dict, index: dict) -> list[Insight]:
             {"dated_docs": time_axis["dated_docs"],
              "total_docs": time_axis["total_docs"],
              "coverage": time_axis["coverage"], "threshold": time_axis["threshold"]},
-            f"只有 {time_axis['dated_docs']} 篇能确定时间"
-            f"（{_pct(time_axis['dated_docs'], time_axis['total_docs'])}）——"
-            f"导出包里就没带时间戳，所以这份报告里没有任何时间轴洞察",
             {"coverage": time_axis["coverage"]})
 
     links = manifest.get("unresolved_links") or []
@@ -138,20 +136,27 @@ def build_corpus_insights(manifest: dict, index: dict) -> list[Insight]:
             else:
                 by_kind["other"] += 1
         add("broken_refs", {"total": len(links), "by_kind": by_kind},
-            f"有 {len(links)} 处引用指向不存在的目标"
-            f"（附件 {by_kind['attachment']} / 文档 {by_kind['document']}"
-            f" / 认不出是什么 {by_kind['other']}）",
             {"total": len(links)})
 
     if counts["dropped_duplicate"]:
         add("exact_duplicates", {"count": counts["dropped_duplicate"]},
-            f"{counts['dropped_duplicate']} 篇内容完全相同，已合并",
             {"count": counts["dropped_duplicate"]})
+
+    lengths = sorted(len(b) for b in (bodies or {}).values())
+    if lengths:
+        # 不设「不足 N 字」这类阈值：清洗已经把 <200 字的判为空壳，kept 里数它
+        # 只会得到一个恒为 0 的数字。只报分布本身。
+        median = lengths[len(lengths) // 2]
+        add("length_profile",
+            {"count": len(lengths), "median_chars": median,
+             "shortest_chars": lengths[0], "longest_chars": lengths[-1]},
+            {"median_chars": median})
 
     return out
 
 
 TOPIC_INSIGHT_CAP = 12
+KEYWORD_TOP_K = 4
 LONG_ORPHAN_MIN_RESIDUAL = 3
 LONG_ORPHAN_SHOW = 3
 EVIDENCE_SHOW = 3
@@ -180,8 +185,7 @@ def _render_topic(p: dict) -> str:
     # 措辞纪律：产出的是关键词不是主题名。写成「你的主题是 X」就是产物在撒谎——
     # 单语言簇上它给出的可能只是那门语言的通用词。
     return (f"这 {p['doc_count']} 篇里最具区分度的词是 "
-            f"{' · '.join(p['keywords']) if p['keywords'] else '（没有足够区分度的词）'}"
-            f" — 占 kept {100 * p['share_of_kept']:.1f}%")
+            f"{' · '.join(p['keywords'])} — 占 kept {100 * p['share_of_kept']:.1f}%")
 
 
 @_renderer("fragment_zone")
@@ -193,6 +197,41 @@ def _render_fragment(p: dict) -> str:
 def _render_long_orphans(p: dict) -> str:
     return (f"碎片区里篇幅最大的 {len(p['evidence_doc_ids'])} 篇还没长成主题"
             f"（最长 {p['longest_chars']} 字）")
+
+
+@_renderer("retention")
+def _render_retention(p: dict) -> str:
+    return (f"读入 {p['total']} 篇，留下 {p['kept']} 篇"
+            f"（{_pct(p['kept'], p['total'])}）；{p['dropped_stub']} 篇是空壳")
+
+
+@_renderer("date_blindness")
+def _render_date_blindness(p: dict) -> str:
+    # 只陈述事实，不做归因。原先写的是「导出包里就没带时间戳」——那是**结论**，
+    # 覆盖率低也可能是解析器没覆盖到某种格式，空语料时更是纯属胡说。
+    return (f"{p['total_docs']} 篇里只有 {p['dated_docs']} 篇能确定时间"
+            f"（{_pct(p['dated_docs'], p['total_docs'])}，低于 "
+            f"{100 * p['threshold']:.0f}% 的门槛），"
+            f"因此这份报告里没有任何时间轴洞察")
+
+
+@_renderer("broken_refs")
+def _render_broken_refs(p: dict) -> str:
+    k = p["by_kind"]
+    return (f"有 {p['total']} 处引用指向不存在的目标"
+            f"（附件 {k['attachment']} / 文档 {k['document']}"
+            f" / 认不出是什么 {k['other']}）")
+
+
+@_renderer("exact_duplicates")
+def _render_exact_duplicates(p: dict) -> str:
+    return f"{p['count']} 篇内容完全相同，已合并"
+
+
+@_renderer("length_profile")
+def _render_length_profile(p: dict) -> str:
+    return (f"留下的 {p['count']} 篇里，篇幅中位数 {p['median_chars']} 字，"
+            f"最短 {p['shortest_chars']} 字，最长 {p['longest_chars']} 字")
 
 
 def _with_text(insight: Insight) -> Insight:
@@ -232,11 +271,22 @@ def build_topic_insights(
 
     members_of = {ref: group_members(index, ref) for ref in refs}
     keywords = extract_keywords(
-        bodies, {f"{a}|{g}": members_of[(a, g)] for a, g in refs}
+        bodies, {f"{a}|{g}": members_of[(a, g)] for a, g in refs}, top_k=KEYWORD_TOP_K
     )
 
     out: list[Insight] = []
-    for n, ref in enumerate(shown, start=1):
+    unnamed: list[GroupRef] = []
+    for ref in shown:
+        if not keywords[f"{ref[0]}|{ref[1]}"]:
+            # 关键词抽不出来时**不产出洞察**。曾经产出过一条「（没有足够区分度的词）」
+            # 的占位——它既是空洞察（违反「不猜就是不猜」），又会计进 topic 数
+            # 从而把 revisit gate 顶过阈值，等于给回头条件开了第四条兜底路径。
+            # 但也不能悄悄消失：group 本身留在 presentation.group_refs 里，
+            # 并在 unnamed_group_refs 显式记账。
+            unnamed.append(ref)
+    named = [r for r in shown if r not in unnamed]
+
+    for n, ref in enumerate(named, start=1):
         members = members_of[ref]
         evidence = _evidence_docs(index, ref, members)
         payload = {
@@ -253,10 +303,13 @@ def build_topic_insights(
 
     # 只写「12 个主题」而隐去遗漏，才是制造虚假完整性。截断本身不说谎。
     truncated = {
-        "shown": len(shown),
+        "shown": len(named),
         "total": len(refs),
         "omitted_group_refs": [{"analysis_id": a, "group_id": g} for a, g in omitted],
         "omitted_docs": sum(len(members_of[r]) for r in omitted),
+        # 抽不出关键词而没能变成洞察的 group。不记账就等于静默丢弃。
+        "unnamed_group_refs": [{"analysis_id": a, "group_id": g} for a, g in unnamed],
+        "unnamed_docs": sum(len(members_of[r]) for r in unnamed),
     }
     return out, truncated
 
@@ -306,15 +359,17 @@ def build_revisit_gate(
     topic_count: int,
     presentation_group_count: int,
     residual_share: float,
-    corpus_is_first_party: bool = True,
+    corpus_provenance: str = "unknown",
 ) -> dict:
     """回头条件的**收据**，不是开关：触发不改变任何运行时行为。
 
     2B 只供数、不自授裁决权——`state` 由本函数按 rules_version 记录的规则算出，
     是可复现的记录，供下一次人类决策使用。
 
-    第三条只在**非本人语料**上可判。拿本人的第二份语料冒充它通过，
-    正是这条回头条件想防的自证。
+    第三条只在**已知第三方**语料上可判。`corpus_provenance` 默认 `"unknown"`——
+    工具无从知道手里这份导出是谁的，而默认成 `first_party` 会让每一次运行都
+    自称自有语料、把这条 gate 永久禁用：那正是它想防的自证，却由一个默认值实现了
+    （Codex 终审抓到的第 6 条）。取值 `unknown` / `first_party` / `third_party`。
 
     ⚠️ 判据是 **topic 族条数**，不是洞察总数。按总数算的话，corpus 族的统计条目
     会把数量填满，①永远为假——这个项目已经有三轮「留一条兜底路径，规则就被
@@ -335,7 +390,7 @@ def build_revisit_gate(
             "topic_insight_count": topic_count,
             "presentation_group_count": presentation_group_count,
             "residual_share": round(residual_share, 6),
-            "corpus_is_first_party": corpus_is_first_party,
+            "corpus_provenance": corpus_provenance,
         },
         "conditions": [
             cond("insufficient_topics", INSUFFICIENT_TOPICS_THRESHOLD, topic_count,
@@ -346,8 +401,9 @@ def build_revisit_gate(
                  "subdivide"),
             cond("residual_high", RESIDUAL_HIGH_THRESHOLD, round(residual_share, 6),
                  residual_share > RESIDUAL_HIGH_THRESHOLD, "halo",
-                 not_evaluable="requires_third_party_corpus"
-                 if corpus_is_first_party else None),
+                 not_evaluable=None if corpus_provenance == "third_party"
+                 else ("corpus_provenance_unknown" if corpus_provenance == "unknown"
+                       else "requires_third_party_corpus")),
         ],
     }
 
@@ -358,7 +414,7 @@ def build_insight_set(
     bodies: dict[str, str],
     titles: dict[str, str],
     *,
-    corpus_is_first_party: bool = True,
+    corpus_provenance: str = "unknown",
 ) -> dict:
     from dataclasses import asdict
 
@@ -368,7 +424,7 @@ def build_insight_set(
     kept = manifest["counts"]["kept"]
     topics, truncated = build_topic_insights(index, bodies, titles, kept)
     residual = build_residual_insights(index, bodies, titles, kept)
-    corpus = build_corpus_insights(manifest, index)
+    corpus = build_corpus_insights(manifest, index, bodies)
     items = [*topics, *residual, *corpus]
 
     families = [i.family for i in items]
@@ -384,6 +440,13 @@ def build_insight_set(
         "naming": {"method": DEFAULT_PARAMS["method"],
                    "params": {k: v for k, v in DEFAULT_PARAMS.items()
                               if k != "method"}},
+        # 这些常量都改变产物长什么样。不落盘的话，两份 insights.json 的差异
+        # 就无法归因到「换了阈值」还是「换了语料」——产物在隐瞒自己的成因。
+        "limits": {"topic_insight_cap": TOPIC_INSIGHT_CAP,
+                   "keyword_top_k": KEYWORD_TOP_K,
+                   "evidence_show": EVIDENCE_SHOW,
+                   "long_orphan_min_residual": LONG_ORPHAN_MIN_RESIDUAL,
+                   "long_orphan_show": LONG_ORPHAN_SHOW},
         "presentation": {
             "group_refs": [{"analysis_id": a, "group_id": g} for a, g in refs],
             "truncated": truncated,
@@ -394,8 +457,7 @@ def build_insight_set(
                    "corpus": families.count("corpus"),
                    "total": len(items)},
         "revisit_gate": build_revisit_gate(
-            families.count("topic"), len(refs), residual_share,
-            corpus_is_first_party),
+            families.count("topic"), len(refs), residual_share, corpus_provenance),
         "insights": [asdict(i) for i in items],
     }
 

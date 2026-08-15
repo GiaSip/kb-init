@@ -1,6 +1,7 @@
 import argparse
 import sys
 import zipfile
+from pathlib import Path
 
 from kb_init import __version__
 
@@ -33,7 +34,6 @@ def _validate_command(md_path: str) -> int:
     不合法」，下一步动作完全不同（重跑 vs 改文件）。
     """
     import json
-    from pathlib import Path
 
     from kb_init.insights_md import InsightsValidationError, validate_markdown
 
@@ -63,11 +63,15 @@ def main(argv: list[str] | None = None) -> int:
     # 不用 argparse subparsers：现有用法 `kb-init <source>` 是位置参数，
     # 改成子命令解析会把它弄坏（下面有一条测试专盯这个）。
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] == "validate":
-        if len(argv) != 2:
-            print("用法：kb-init validate <insights.md>", file=sys.stderr)
-            return 2
+    # 只在「恰好两个参数、且第二个是已存在的文件」时才认作子命令。
+    # 无条件按首参数分流会让一个真叫 validate 的目录再也无法作为 source 处理
+    # ——那是拿一个合法输入名去换命令语法，代价方向反了。
+    if (len(argv) == 2 and argv[0] == "validate"
+            and Path(argv[1]).is_file()):
         return _validate_command(argv[1])
+    if argv and argv[0] == "validate" and not Path(argv[0]).exists():
+        print("用法：kb-init validate <insights.md>", file=sys.stderr)
+        return 2
 
     parser = build_parser()
     try:

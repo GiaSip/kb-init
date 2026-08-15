@@ -257,11 +257,29 @@ def validate_index(
                     (a["analysis_id"], m["group_id"]), set()
                 ).add(asg["doc_id"])
 
-    for child in analyses[1:]:
+    seen_scopes: set[tuple[str, str]] = set()
+    for position, child in enumerate(analyses[1:], start=1):
         scope = child["input_scope"]
         if scope.get("kind") != "parent_group":
             raise ValueError(f"子分析的 input_scope 必须是 parent_group：{scope}")
         key = (scope["analysis_id"], scope["group_id"])
+        # 下面四条都不会让任何东西崩溃，只会让「呈现级 group」这个派生量
+        # 少算或重复算——而算错没有任何症状。
+        if child["parent_analysis_id"] != scope["analysis_id"]:
+            raise ValueError(
+                f"子分析 {child['analysis_id']} 的 parent_analysis_id 与 "
+                f"input_scope.analysis_id 不一致"
+            )
+        if scope["analysis_id"] == child["analysis_id"]:
+            raise ValueError(f"子分析 {child['analysis_id']} 指向自己")
+        if scope["analysis_id"] not in analysis_ids[:position]:
+            # 只能指向**排在自己前面**的分析：这一条同时排除了循环引用与前向引用
+            raise ValueError(
+                f"子分析 {child['analysis_id']} 指向的父分析未排在它之前：{key}"
+            )
+        if key in seen_scopes:
+            raise ValueError(f"同一个父 group 被细分了两次：{key}")
+        seen_scopes.add(key)
         if key not in members_by_group:
             raise ValueError(f"子分析指向不存在的父 group：{key}")
         expected = sorted(members_by_group[key])

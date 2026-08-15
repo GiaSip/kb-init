@@ -156,14 +156,22 @@ def _run_insights_stage(
         return "complete", None
     except Exception as exc:
         reason = _classify_insights_failure(exc)
+        # 清理路径**绝不允许把异常放出去**。放出去就会穿到 run() 的 finally，
+        # 把已经完成的清洗产物与索引一起删掉——那正是硬不变量 #2 禁止的事。
+        #
+        # 那半份洞察文件怎么办？让它留着，但把真相记在 manifest 里：
+        # `insights_status=failed` + `insights_reason=io_failed`。**manifest 才是
+        # 「哪些产物算数」的权威**，这也正是当初要有 status 字段的原因；
+        # 下游（validate / compile）读不到配对的另一半自然会 fail closed。
+        # 用「毁掉两份完好的产物」去换「删干净一份坏产物」，代价方向反了。
         try:
             from kb_init.insights import cleanup_insight_files, insight_files_remain
 
             cleanup_insight_files(staging)
             if insight_files_remain(staging):
-                raise OSError("洞察半成品无法清除")
-        except ImportError:
-            pass
+                reason = "io_failed"
+        except Exception:
+            reason = "io_failed"
         return "failed", reason
 
 
@@ -172,8 +180,12 @@ def _subdivide_flagged_groups(
 ) -> list[dict]:
     """2A′：把内聚度贴近 residual 基线的 group 细分成 analyses[1..]。
 
-    **`analyses[0]` 一个字节都不改。** 2A 合同要求同时保留「第一轮的 residual」
-    与「第二轮的 assigned」两套 disposition——回头编辑父分析会直接毁掉它。
+    **细分不回头修改 `analyses[0]` 的任何字段**——2A 合同要求同时保留「第一轮的
+    residual」与「第二轮的 assigned」两套 disposition，编辑父分析会直接毁掉它。
+
+    ⚠️ 这不等于「analyses[0] 与 2A 时期逐字节相同」：本轮给 `method.params` 新增了
+    `cluster_selection_method` 与 `cohesion_lift_min`（参数必须随产物落盘）。
+    不变的是**细分这个动作**不碰父分析，不是 schema 冻结。
 
     这个函数由 `_run_index_stage` 在它的 try 内部调用，因此异常照常向上抛，
     由那一层吸收成 index_status=failed 并回滚整个索引子事务。
@@ -365,11 +377,14 @@ def _run_index_stage(
 
             cleanup_index_files(staging)
             if index_files_remain(staging):
-                # 回滚没干净就不能声称"只是索引没做成"——半个索引会让 2B 读到
-                # 一份说谎的产物，那比整次失败更糟。
-                raise OSError("索引半成品无法清除")
-        except ImportError:
-            pass                        # index 模块本身没导入成功，自然没有半成品
+                # 曾经在这里 `raise OSError`，理由是「半个索引比整次失败更糟」。
+                # 那条推理漏了一步：raise 会穿到 run() 的 finally，把**清洗产物**
+                # 也一起删掉——而清洗产物是完好的，用户要的正是它。
+                # 半个索引由 manifest 兜住：index_status=failed 就是「别信这些文件」，
+                # 这也正是当初要有 status 字段的原因。清理路径绝不放异常出去。
+                reason = "io_failed"
+        except Exception:
+            reason = "io_failed"
         return "failed", reason
 
 

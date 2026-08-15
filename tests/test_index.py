@@ -381,3 +381,82 @@ def test_read_index_rejects_wrong_dtype(tmp_path):
     np.save(tmp_path / "index-vectors.npy", np.eye(2, 3, dtype=np.float64))
     with pytest.raises(ValueError, match="float32"):
         read_index(tmp_path)
+
+
+def test_child_must_declare_the_same_parent_as_its_scope():
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    child = build_analysis(
+        analysis_id="topics-02", parent_analysis_id="topics-99",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[], extra_analyses=[child])
+    with pytest.raises(ValueError, match="parent_analysis_id"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_child_pointing_at_itself_is_rejected():
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    child = build_analysis(
+        analysis_id="topics-02", parent_analysis_id="topics-02",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-02",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[], extra_analyses=[child])
+    with pytest.raises(ValueError, match="指向自己"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_forward_reference_to_a_later_analysis_is_rejected():
+    """指向排在自己后面的分析——这一条同时挡住循环引用。"""
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    first = build_analysis(
+        analysis_id="topics-02", parent_analysis_id="topics-03",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-03",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    second = build_analysis(
+        analysis_id="topics-03", parent_analysis_id="topics-01",
+        input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                     "group_id": "g01"},
+        groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[],
+                        extra_analyses=[first, second])
+    with pytest.raises(ValueError, match="未排在它之前"):
+        validate_index(index, ["d1", "d2", "d3"])
+
+
+def test_same_parent_group_cannot_be_subdivided_twice():
+    """细分同一个父簇两次会让呈现级 group 重复计数——而重复计数没有症状。"""
+    from kb_init.index import build_analysis
+
+    pg, pa = _parent_parts()
+    cg, ca = _child_parts()
+    kids = [
+        build_analysis(
+            analysis_id=f"topics-{n:02d}", parent_analysis_id="topics-01",
+            input_scope={"kind": "parent_group", "analysis_id": "topics-01",
+                         "group_id": "g01"},
+            groups=cg, assignments=ca, method=_m(), time_axis=_ta())
+        for n in (2, 3)
+    ]
+    index = build_index(run_id="r", corpus_hash="c", chunks=[], groups=pg,
+                        assignments=pa, method=_m(), time_axis=_ta(),
+                        versions={}, vector_doc_ids=[], extra_analyses=kids)
+    with pytest.raises(ValueError, match="两次"):
+        validate_index(index, ["d1", "d2", "d3"])

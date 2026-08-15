@@ -159,7 +159,7 @@ def test_apple_notes_has_no_flagged_group(tmp_path):
 
     payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
     assert payload["counts"]["topic"] == 5
-    assert 8 <= payload["counts"]["total"] <= 14
+    assert 9 <= payload["counts"]["total"] <= 15
     gate = {c["id"]: c for c in payload["revisit_gate"]["conditions"]}
     assert gate["residual_high"]["state"] == "not_evaluable"
     assert gate["insufficient_topics"]["state"] == "not_triggered"

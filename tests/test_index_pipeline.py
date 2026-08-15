@@ -509,3 +509,40 @@ def test_half_written_insights_are_rolled_back(tmp_path, monkeypatch):
     assert not (out / "insights.json").exists()
     assert not (out / "insights.md").exists()
     assert (out / "index.json").exists()
+
+
+def test_cleanup_failure_never_destroys_completed_products(tmp_path, monkeypatch):
+    """清理路径放异常出去，就会穿到 run() 的 finally 把清洗产物一起删掉。
+
+    构造：写洞察时炸 + 清理时也删不掉。断言清洗产物与索引都还在，
+    且真相记在 manifest 里（insights_status=failed / io_failed）。
+    """
+    import kb_init.insights as mod
+
+    monkeypatch.setattr(mod, "build_insight_set",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    monkeypatch.setattr(mod, "cleanup_insight_files",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("删不掉")))
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    assert summary["insights_status"] == "failed"
+    assert summary["insights_reason"] == "io_failed"
+    assert (out / "knowledge").is_dir()              # 清洗产物必须还在
+    assert (out / "index.json").exists()             # 索引也是完好的
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "failed"
+
+
+def test_index_cleanup_failure_never_destroys_cleaned_output(tmp_path, monkeypatch):
+    """索引层的同一条路径（2A 遗留）。"""
+    import kb_init.index as mod
+
+    monkeypatch.setattr(mod, "cleanup_index_files",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("删不掉")))
+    from tests.fakes import BrokenEmbedder
+
+    out = tmp_path / "out"
+    summary = run(_shaped(tmp_path), out, embedder=BrokenEmbedder("nan"), run_id="t")
+    assert summary["index_status"] == "failed"
+    assert summary["index_reason"] == "io_failed"
+    assert (out / "knowledge").is_dir()

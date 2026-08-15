@@ -122,6 +122,7 @@ def test_member_counts_match_actual_memberships():
     ids, rows = _two_tight_blobs()
     groups, assignments = subdivide_group("g01", ids, rows, 0.3,
                                           min_cluster_size=3, min_samples=3)
+    assert len(groups) >= 2, "细分退化成空时下面的循环恒真"
     for g in groups:
         actual = sum(1 for a in assignments
                      for m in a.memberships if m.group_id == g.group_id)

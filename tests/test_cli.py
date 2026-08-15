@@ -133,3 +133,15 @@ def test_normal_run_still_works_after_adding_the_subcommand(tmp_path):
     src.mkdir()
     (src / "a.md").write_text("# a\n\n" + "内容内容内容 " * 60, encoding="utf-8")
     assert main([str(src), "-o", str(tmp_path / "out"), "--no-index"]) == 0
+
+
+def test_a_directory_literally_named_validate_is_still_processable(tmp_path, monkeypatch):
+    """无条件按首参数分流会吃掉一个合法的 source 名。"""
+    from kb_init.cli import main
+
+    monkeypatch.chdir(tmp_path)
+    src = tmp_path / "validate"
+    src.mkdir()
+    (src / "a.md").write_text("# a\n\n" + "内容内容内容 " * 60, encoding="utf-8")
+    assert main(["validate", "-o", str(tmp_path / "out"), "--no-index"]) == 0
+    assert (tmp_path / "out" / "knowledge").is_dir()

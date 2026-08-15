@@ -211,6 +211,7 @@ def test_evidence_docs_are_real_members_of_their_group():
     index = _corpus_index(3)
     bodies, titles = _bodies_titles(index)
     insights, _ = build_topic_insights(index, bodies, titles, kept_count=25)
+    assert len(insights) == 3, "topic 全消失时下面的循环恒真"
     from kb_init.insights import group_members
     for ins in insights:
         ref = (ins.payload["group_ref"]["analysis_id"],
@@ -305,15 +306,27 @@ from kb_init.insights import (
 )
 
 
-def _std_manifest():
-    return {"counts": {"total": 40, "kept": 25, "dropped_stub": 15,
+def _std_manifest(**over):
+    base = {"counts": {"total": 40, "kept": 25, "dropped_stub": 15,
                        "dropped_duplicate": 0},
             "unresolved_links": [], "documents": []}
+    base.update(over)
+    return base
+
+
+def test_gate_defaults_to_unknown_provenance_not_first_party():
+    """默认值绝不能是 first_party：那会让每次运行都自称自有语料、把这条
+    gate 永久禁用——用一个默认值实现了它本来要防的自证。"""
+    gate = build_revisit_gate(10, 10, 0.84)
+    states = {c["id"]: c for c in gate["conditions"]}
+    assert gate["inputs"]["corpus_provenance"] == "unknown"
+    assert states["residual_high"]["state"] == "not_evaluable"
+    assert states["residual_high"]["reason"] == "corpus_provenance_unknown"
 
 
 def test_gate_marks_residual_not_evaluable_on_first_party_corpus():
     gate = build_revisit_gate(topic_count=10, presentation_group_count=10,
-                              residual_share=0.84, corpus_is_first_party=True)
+                              residual_share=0.84, corpus_provenance="first_party")
     states = {c["id"]: c for c in gate["conditions"]}
     assert states["residual_high"]["state"] == "not_evaluable"
     assert states["residual_high"]["reason"] == "requires_third_party_corpus"
@@ -322,20 +335,20 @@ def test_gate_marks_residual_not_evaluable_on_first_party_corpus():
 
 
 def test_gate_triggers_on_third_party_corpus_with_high_residual():
-    gate = build_revisit_gate(10, 10, 0.84, corpus_is_first_party=False)
+    gate = build_revisit_gate(10, 10, 0.84, corpus_provenance="third_party")
     states = {c["id"]: c for c in gate["conditions"]}
     assert states["residual_high"]["state"] == "triggered"
 
 
 def test_gate_does_not_trigger_residual_when_share_is_low():
-    gate = build_revisit_gate(10, 10, 0.32, corpus_is_first_party=False)
+    gate = build_revisit_gate(10, 10, 0.32, corpus_provenance="third_party")
     states = {c["id"]: c for c in gate["conditions"]}
     assert states["residual_high"]["state"] == "not_triggered"
 
 
 def test_gate_topic_conditions_use_topic_count_not_total():
     gate = build_revisit_gate(topic_count=2, presentation_group_count=2,
-                              residual_share=0.1, corpus_is_first_party=False)
+                              residual_share=0.1, corpus_provenance="third_party")
     states = {c["id"]: c for c in gate["conditions"]}
     assert states["insufficient_topics"]["state"] == "triggered"
     assert states["topics_concentrated"]["state"] == "triggered"
@@ -372,13 +385,36 @@ def test_naming_params_are_recorded_in_the_artifact():
         assert key in params
 
 
-def test_every_insight_carries_nonempty_canonical_text():
+def test_render_is_the_sole_generator_for_every_family():
+    """双真源的锁必须覆盖**全部三族**。原先只查了 topic/residual，
+    corpus 族手写 canonical_text 的漂移就漏过去了（Codex 终审第 4 条）。"""
+    from kb_init.insights import Insight, render
+
     index = _corpus_index(3)
-    bodies, titles = _bodies_titles(index)
-    payload = build_insight_set(index, _std_manifest(), bodies, titles)
-    assert payload["insights"]
+    bodies, titles = _bodies_titles(index, long_residual=True)
+    payload = build_insight_set(index, _std_manifest(
+        counts={"total": 40, "kept": 25, "dropped_stub": 14, "dropped_duplicate": 1},
+        unresolved_links=[{"from_doc_id": "x", "target": "a.png"}]), bodies, titles)
+    families = {i["family"] for i in payload["insights"]}
+    assert families == {"topic", "residual", "corpus"}, families
     for item in payload["insights"]:
         assert item["canonical_text"]
+        assert render(Insight(**item)) == item["canonical_text"], item["insight_id"]
+
+
+def test_groups_without_keywords_are_not_emitted_but_are_accounted_for():
+    """占位洞察会计进 topic 数、把 revisit gate 顶过阈值——那是第四条兜底路径。
+    不产出，但必须记账，不能静默消失。"""
+    index = _corpus_index(2)
+    bodies, titles = _bodies_titles(index)
+    # 让所有文档正文完全一样 → 没有任何词有区分度
+    same = "完全一样的正文 identical body text " * 8
+    bodies = {d: same for d in bodies}
+    insights, truncated = build_topic_insights(index, bodies, titles, kept_count=20)
+    assert insights == []
+    assert len(truncated["unnamed_group_refs"]) == 2
+    assert truncated["unnamed_docs"] == 10
+    assert truncated["shown"] == 0
 
 
 def test_is_byte_identical_across_runs():
@@ -413,3 +449,19 @@ def test_write_then_cleanup_leaves_nothing(tmp_path):
     assert insight_files_remain(tmp_path)
     cleanup_insight_files(tmp_path)
     assert not insight_files_remain(tmp_path)
+
+
+def test_length_profile_reports_the_distribution_without_a_magic_threshold():
+    bodies = {f"d{i}": "x" * (100 * (i + 1)) for i in range(5)}
+    got = {i.kind: i for i in
+           build_corpus_insights(_manifest(), _residual_only_index(), bodies)}
+    assert "length_profile" in got
+    p = got["length_profile"].payload
+    assert p["count"] == 5
+    assert p["shortest_chars"] == 100 and p["longest_chars"] == 500
+    assert p["median_chars"] == 300
+
+
+def test_length_profile_absent_when_there_are_no_bodies():
+    kinds = {i.kind for i in build_corpus_insights(_manifest(), _residual_only_index())}
+    assert "length_profile" not in kinds

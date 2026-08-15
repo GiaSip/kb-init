@@ -35,8 +35,8 @@ def render_markdown(payload: dict) -> str:
         f"corpus_hash={payload['corpus_hash']} "
         f"schema_version={payload['schema_version']} -->",
         "",
-        "> 只改 `[x]` / `[ ]`。改正文不会生效——`compile` 按 ID 从 insights.json 取正文。",
-        "> 改完跑 `kb-init compile`，或先跑 `kb-init validate insights.md` 单独校验。",
+        "> 只改 `[x]` / `[ ]`。改正文不会生效——下游按 ID 从 insights.json 取正文。",
+        "> 改完跑 `kb-init validate insights.md` 校验这份清单是否仍然合法。",
         "",
     ]
     by_family: dict[str, list[dict]] = {}
@@ -101,6 +101,13 @@ def validate_markdown(text: str, payload: dict) -> None:
         raise InsightsValidationError(
             f"corpus_hash 不匹配：文件是 {header.group('corpus_hash')}，"
             f"insights.json 是 {payload['corpus_hash']}——语料已经变了。"
+        )
+    if header.group("schema_version") != payload["schema_version"]:
+        # 头部三个字段里有一个从不比对，等于给跨版本清单留了一条兜底通道
+        raise InsightsValidationError(
+            f"schema_version 不匹配：文件是 {header.group('schema_version')}，"
+            f"insights.json 是 {payload['schema_version']}——"
+            f"两者不是同一版格式，请用本次运行产出的 insights.md 重新开始。"
         )
 
     known = {i["insight_id"] for i in payload["insights"]}
