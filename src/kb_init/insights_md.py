@@ -14,6 +14,10 @@ _HEADER = re.compile(
     r"\s+schema_version=(?P<schema_version>\S+)\s*-->"
 )
 _ITEM = re.compile(r"^- \[(?P<mark>[x ])\] `(?P<id>[A-Za-z]+\d+)`")
+# 只用来给出**有针对性的报错**，绝不用来放宽解析。用户把 `[x]` 写成 `[X]`、
+# 或给行加了缩进时，严格正则会整行跳过，最后报「清单里缺少 T2」——那句话
+# 会让用户以为自己删了东西，实际是勾选框写法不对。
+_ITEM_LOOSE = re.compile(r"^\s*[-*]?\s*\[(?P<mark>.?)\]\s*`(?P<id>[A-Za-z]+\d+)`")
 
 _SECTIONS = (("topic", "主题"), ("residual", "碎片区"), ("corpus", "语料"))
 
@@ -104,6 +108,13 @@ def validate_markdown(text: str, payload: dict) -> None:
     for lineno, line in enumerate(text.splitlines(), start=1):
         match = _ITEM.match(line)
         if not match:
+            loose = _ITEM_LOOSE.match(line)
+            if loose and loose.group("id") in known:
+                raise InsightsValidationError(
+                    f"第 {lineno} 行：{loose.group('id')} 的勾选框格式不对。"
+                    f"只认 `- [x] ` 与 `- [ ] `——不能缩进，`x` 必须小写，"
+                    f"横线与方括号之间要有一个空格。"
+                )
             continue
         insight_id = match.group("id")
         if insight_id in seen:

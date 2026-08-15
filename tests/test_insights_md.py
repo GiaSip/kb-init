@@ -132,3 +132,25 @@ def test_empty_insight_set_renders_a_valid_header_only_document():
     md = render_markdown(empty)
     assert parse_markdown(md)["selections"] == {}
     validate_markdown(md, empty)
+
+
+def test_uppercase_checkbox_gets_a_targeted_error_not_a_misleading_one():
+    """fail closed 是对的，但「缺少 T2」会让用户以为自己删了东西。
+    实际是勾选框写法不对——诊断必须说出真正的原因。"""
+    md = render_markdown(_payload()).replace("- [x] `T2`", "- [X] `T2`")
+    with pytest.raises(InsightsValidationError, match=r"第 \d+ 行.*T2.*勾选框"):
+        validate_markdown(md, _payload())
+
+
+def test_indented_item_gets_a_targeted_error():
+    md = render_markdown(_payload()).replace("- [x] `T1`", "  - [x] `T1`")
+    with pytest.raises(InsightsValidationError, match=r"第 \d+ 行.*T1.*勾选框"):
+        validate_markdown(md, _payload())
+
+
+def test_a_genuinely_deleted_line_still_reports_as_missing():
+    """近似匹配诊断不能把「真删了一行」也说成格式问题。"""
+    md = "\n".join(line for line in render_markdown(_payload()).splitlines()
+                   if "`C1`" not in line)
+    with pytest.raises(InsightsValidationError, match="缺少"):
+        validate_markdown(md, _payload())
