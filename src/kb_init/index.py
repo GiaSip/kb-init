@@ -330,6 +330,28 @@ def write_index(out_dir: Path, index: dict, matrix: np.ndarray) -> None:
         raise
 
 
+def read_index(out_dir: Path) -> tuple[dict, np.ndarray]:
+    """下游（2B/2C/2D/2E）读取索引的**唯一**入口。
+
+    文件被截断时 shape 仍可能「看起来合理」，只比对元数据不够——所以这里把
+    2A spec §6 要求读取方做的完整性校验一次性做掉，避免三个下游各写一遍、
+    各漏一条。
+    """
+    out_dir = Path(out_dir)
+    index = json.loads((out_dir / "index.json").read_text(encoding="utf-8"))
+    matrix = np.load(out_dir / "index-vectors.npy")
+    if matrix.ndim != 2:
+        raise ValueError(f"向量矩阵必须是二维，得到 {matrix.ndim} 维")
+    if matrix.dtype != np.float32:
+        raise ValueError(f"向量矩阵必须是 float32，得到 {matrix.dtype}")
+    if matrix.size and not np.all(np.isfinite(matrix)):
+        raise ValueError("向量矩阵含 NaN 或 Inf")
+    expected = len(index["vector_doc_ids"])
+    if matrix.shape[0] != expected:
+        raise ValueError(f"向量行数 {matrix.shape[0]} 与 vector_doc_ids {expected} 不符")
+    return index, matrix
+
+
 def cleanup_index_files(out_dir: Path) -> None:
     """尽力删掉全部索引文件，**逐个独立尝试**。
 

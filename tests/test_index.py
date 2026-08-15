@@ -333,3 +333,51 @@ def test_analysis_ids_must_be_unique():
     index = _index_with_child(child_id="topics-01")
     with pytest.raises(ValueError, match="analysis_id"):
         validate_index(index, ["d1", "d2", "d3"])
+
+
+# ---------------- read_index：下游读取的唯一入口 ----------------
+
+def _minimal_index():
+    return build_index(run_id="r", corpus_hash="c", chunks=[], groups=[],
+                       assignments=[], method=_m(), time_axis=_ta(),
+                       versions={}, vector_doc_ids=["d1", "d2"])
+
+
+def test_read_index_round_trips(tmp_path):
+    from kb_init.index import read_index
+
+    index = _minimal_index()
+    write_index(tmp_path, index, np.eye(2, 3, dtype=np.float32))
+    got_index, got_matrix = read_index(tmp_path)
+    assert got_index["run_id"] == "r"
+    assert got_matrix.shape == (2, 3)
+    assert got_matrix.dtype == np.float32
+
+
+def test_read_index_rejects_row_count_mismatch(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    np.save(tmp_path / "index-vectors.npy", np.eye(5, 3, dtype=np.float32))
+    with pytest.raises(ValueError, match="行数"):
+        read_index(tmp_path)
+
+
+def test_read_index_rejects_non_finite(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    bad = np.eye(2, 3, dtype=np.float32)
+    bad[0, 0] = np.nan
+    np.save(tmp_path / "index-vectors.npy", bad)
+    with pytest.raises(ValueError, match="NaN"):
+        read_index(tmp_path)
+
+
+def test_read_index_rejects_wrong_dtype(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    np.save(tmp_path / "index-vectors.npy", np.eye(2, 3, dtype=np.float64))
+    with pytest.raises(ValueError, match="float32"):
+        read_index(tmp_path)
