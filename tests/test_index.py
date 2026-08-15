@@ -482,9 +482,17 @@ def test_read_index_refuses_when_manifest_says_index_is_not_complete(tmp_path):
     _publish(tmp_path, index_status="failed")
     with pytest.raises(ValueError, match="complete"):
         read_index(tmp_path)
-    # 管线内部（manifest 尚未写出）是唯一合法例外
-    index, matrix = read_index(tmp_path, trust_manifest=False)
-    assert index["run_id"] == "r"
+
+
+def test_read_index_has_no_bypass_parameter():
+    """公共读取函数上不许有绕过 manifest 的开关——那是给逃生门装了个把手，
+    而这个项目的教训是：只要留一条兜底路径，规则就会被它绕过。"""
+    import inspect
+
+    from kb_init.index import read_index
+
+    params = set(inspect.signature(read_index).parameters)
+    assert params == {"out_dir"}, params
 
 
 def test_read_index_accepts_a_complete_run(tmp_path):
@@ -495,6 +503,27 @@ def test_read_index_accepts_a_complete_run(tmp_path):
     _publish(tmp_path)
     index, _ = read_index(tmp_path)
     assert index["run_id"] == "r"
+
+
+def test_read_index_rejects_a_manifest_without_the_status_field(tmp_path):
+    import json as _json
+
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    (tmp_path / "manifest.json").write_text(_json.dumps({"run_id": "r"}),
+                                            encoding="utf-8")
+    with pytest.raises(ValueError, match="index_status"):
+        read_index(tmp_path)
+
+
+def test_read_index_rejects_a_corrupt_manifest(tmp_path):
+    from kb_init.index import read_index
+
+    write_index(tmp_path, _minimal_index(), np.eye(2, 3, dtype=np.float32))
+    (tmp_path / "manifest.json").write_text("{ 这不是 json", encoding="utf-8")
+    with pytest.raises(ValueError, match="index_status"):
+        read_index(tmp_path)
 
 
 def test_read_index_without_a_manifest_fails_closed_with_a_clear_message(tmp_path):

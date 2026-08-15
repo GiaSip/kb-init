@@ -348,37 +348,39 @@ def write_index(out_dir: Path, index: dict, matrix: np.ndarray) -> None:
         raise
 
 
-def read_index(out_dir: Path, *, trust_manifest: bool = True) -> tuple[dict, np.ndarray]:
+def read_index(out_dir: Path) -> tuple[dict, np.ndarray]:
     """下游（2B/2C/2D/2E）读取索引的**唯一**入口。
 
     文件被截断时 shape 仍可能「看起来合理」，只比对元数据不够——所以这里把
     2A spec §6 要求读取方做的完整性校验一次性做掉，避免三个下游各写一遍、
     各漏一条。
 
-    **默认先问 manifest 这份索引算不算数。** 清理失败时我们选择保住完好的清洗
-    产物、让半份索引留在盘上，理由是「manifest 才是权威」——但那句话只有在
-    读取入口真的去问 manifest 时才成立，否则它就是一张空头支票：
+    **总是先问 manifest 这份索引算不算数，没有例外。** 清理失败时我们选择保住
+    完好的清洗产物、让半份索引留在盘上，理由是「manifest 才是权威」——但那句话
+    只有在读取入口真的去问 manifest 时才成立，否则它就是一张空头支票：
     一份外观完整的残留文件照样会被下游当真。
 
-    `trust_manifest=False` 只给**管线内部**用：洞察阶段跑在 `write_manifest`
-    之前，那时 manifest 还不存在。这是唯一的合法例外，别在别处传。
+    这里**刻意没有 `trust_manifest=False` 之类的开关**。管线内部要在 manifest
+    写出之前读回索引，解法是先写一份 provisional manifest（见 `pipeline.run`），
+    而不是给公共函数开一个绕过参数——这个项目的教训是：只要留一条兜底路径，
+    规则就会被它绕过。
     """
     out_dir = Path(out_dir)
-    if trust_manifest:
-        from kb_init.manifest import read_manifest
+    from kb_init.manifest import read_manifest
 
-        try:
-            status = read_manifest(out_dir).get("index_status")
-        except (OSError, ValueError) as exc:
-            # 没有 manifest 就没有权威可问——不猜，直接拒读
-            raise ValueError(
-                f"读不到 {out_dir}/manifest.json，无法确认这份索引是否算数：{exc}"
-            ) from exc
-        if status != "complete":
-            raise ValueError(
-                f"manifest 说这次运行的索引状态是 {status!r}，不是 complete——"
-                f"拒绝读取可能是残留或半成品的索引文件。"
-            )
+    try:
+        status = read_manifest(out_dir)["index_status"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # 没有 manifest（或读不出这个字段）就没有权威可问——不猜，直接拒读
+        raise ValueError(
+            f"读不到 {out_dir}/manifest.json 里的 index_status（{exc}），"
+            f"无法确认这份索引是否算数。"
+        ) from exc
+    if status != "complete":
+        raise ValueError(
+            f"manifest 说这次运行的索引状态是 {status!r}，不是 complete——"
+            f"拒绝读取可能是残留或半成品的索引文件。"
+        )
     index = json.loads((out_dir / "index.json").read_text(encoding="utf-8"))
     matrix = np.load(out_dir / "index-vectors.npy")
     if matrix.ndim != 2:

@@ -58,17 +58,22 @@ def _validate_command(md_path: str) -> int:
     # 盘上（为了不牵连完好的清洗产物），那笔账记在 manifest 里——
     # 读取入口不去问，这条兜底就形同虚设。
     manifest_path = md.with_name("manifest.json")
-    if manifest_path.exists():
-        try:
-            status = json.loads(
-                manifest_path.read_text(encoding="utf-8")
-            ).get("insights_status")
-        except (OSError, ValueError):
-            status = None
-        if status is not None and status != "complete":
-            print(f"错误：manifest 说这次运行的洞察状态是 {status!r}，不是 complete"
-                  f"——这两份文件可能是残留或半成品，拒绝校验。", file=sys.stderr)
-            return 7
+    try:
+        status = json.loads(
+            manifest_path.read_text(encoding="utf-8")
+        )["insights_status"]
+    except (OSError, ValueError, KeyError) as exc:
+        # 缺失 / 损坏 / 没这个字段，三种都拒绝，不「读不到就跳过」。
+        # read_index 那边已经是拒读，这里放行就等于两个入口两套标准——
+        # 而只要留一条兜底路径，规则就会被它绕过。
+        print(f"错误：读不到 {manifest_path} 里的 insights_status（{exc}），"
+              f"无法确认这两份文件算不算数。校验需要它们与 manifest 放在一起。",
+              file=sys.stderr)
+        return 7
+    if status != "complete":
+        print(f"错误：manifest 说这次运行的洞察状态是 {status!r}，不是 complete"
+              f"——这两份文件可能是残留或半成品，拒绝校验。", file=sys.stderr)
+        return 7
     try:
         payload = json.loads(json_path.read_text(encoding="utf-8"))
         validate_markdown(md.read_text(encoding="utf-8"), payload)

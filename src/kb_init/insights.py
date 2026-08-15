@@ -147,8 +147,9 @@ def build_corpus_insights(
     if lengths:
         # 不设「不足 N 字」这类阈值：清洗已经把 <200 字的判为空壳，kept 里数它
         # 只会得到一个恒为 0 的数字。只报分布本身。
-        # 偶数样本取上中位数会让 [100, 200] 报成 200。用 statistics.median。
-        median = int(statistics.median(lengths))
+        # 偶数样本取上中位数会让 [100, 200] 报成 200；再套 int() 又会把
+        # [100, 101] 的 100.5 截成 100。存精确值，显示时再按需格式化。
+        median = statistics.median(lengths)
         add("length_profile",
             {"count": len(lengths), "median_chars": median,
              "shortest_chars": lengths[0], "longest_chars": lengths[-1]},
@@ -232,7 +233,7 @@ def _render_exact_duplicates(p: dict) -> str:
 
 @_renderer("length_profile")
 def _render_length_profile(p: dict) -> str:
-    return (f"留下的 {p['count']} 篇里，篇幅中位数 {p['median_chars']} 字，"
+    return (f"留下的 {p['count']} 篇里，篇幅中位数 {p['median_chars']:g} 字，"
             f"最短 {p['shortest_chars']} 字，最长 {p['longest_chars']} 字")
 
 

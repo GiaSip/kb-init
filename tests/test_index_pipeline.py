@@ -546,3 +546,32 @@ def test_index_cleanup_failure_never_destroys_cleaned_output(tmp_path, monkeypat
     assert summary["index_status"] == "failed"
     assert summary["index_reason"] == "io_failed"
     assert (out / "knowledge").is_dir()
+
+
+def test_run_rejects_an_illegal_provenance_at_the_entrance(tmp_path):
+    """放到洞察阶段才抛的话，会被那一层的异常吸收器变成 insights_status=failed，
+    程序化调用方永远拿不到 ValueError。"""
+    import pytest
+
+    with pytest.raises(ValueError, match="corpus_provenance"):
+        run(_shaped(tmp_path), tmp_path / "out", embedder=BlobEmbedder(),
+            run_id="t", corpus_provenance="thirdparty")
+
+
+def test_provisional_manifest_is_never_published(tmp_path):
+    """pending 只是给洞察阶段读索引用的中间态，绝不能出现在发布出去的产物里。"""
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "complete"
+
+
+def test_provisional_manifest_is_also_finalised_when_insights_fail(tmp_path, monkeypatch):
+    import kb_init.insights as mod
+
+    monkeypatch.setattr(mod, "build_insight_set",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸")))
+    out = tmp_path / "out"
+    run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["insights_status"] == "failed"

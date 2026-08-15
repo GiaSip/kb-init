@@ -68,7 +68,7 @@ def test_exit_code_0_when_everything_completes(tmp_path, monkeypatch):
 
 # ---------------- kb-init validate ----------------
 
-def _write_pair(tmp_path):
+def _write_pair(tmp_path, insights_status="complete"):
     import json
 
     from kb_init.insights_md import render_markdown
@@ -87,6 +87,10 @@ def _write_pair(tmp_path):
     (tmp_path / "insights.json").write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     (tmp_path / "insights.md").write_text(render_markdown(payload), encoding="utf-8")
+    if insights_status is not None:
+        (tmp_path / "manifest.json").write_text(
+            json.dumps({"insights_status": insights_status, "insights_reason": None}),
+            encoding="utf-8")
     return payload
 
 
@@ -181,10 +185,7 @@ def test_validate_refuses_when_manifest_says_insights_failed(tmp_path, capsys):
 
     from kb_init.cli import main
 
-    _write_pair(tmp_path)
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"insights_status": "failed", "insights_reason": "io_failed"}),
-        encoding="utf-8")
+    _write_pair(tmp_path, insights_status="failed")
     assert main(["validate", str(tmp_path / "insights.md")]) == 7
     assert "complete" in capsys.readouterr().err
 
@@ -195,7 +196,33 @@ def test_validate_accepts_when_manifest_says_complete(tmp_path):
     from kb_init.cli import main
 
     _write_pair(tmp_path)
-    (tmp_path / "manifest.json").write_text(
-        json.dumps({"insights_status": "complete", "insights_reason": None}),
-        encoding="utf-8")
     assert main(["validate", str(tmp_path / "insights.md")]) == 0
+
+
+def test_validate_refuses_when_manifest_is_missing(tmp_path, capsys):
+    """「读不到就跳过」是兜底路径的经典形态——read_index 那边已经拒读，
+    这里放行就是两个入口两套标准。"""
+    from kb_init.cli import main
+
+    _write_pair(tmp_path, insights_status=None)
+    assert main(["validate", str(tmp_path / "insights.md")]) == 7
+    assert "insights_status" in capsys.readouterr().err
+
+
+def test_validate_refuses_when_manifest_is_corrupt(tmp_path):
+    from kb_init.cli import main
+
+    _write_pair(tmp_path, insights_status=None)
+    (tmp_path / "manifest.json").write_text("{ 这不是 json", encoding="utf-8")
+    assert main(["validate", str(tmp_path / "insights.md")]) == 7
+
+
+def test_validate_refuses_when_the_status_field_is_absent(tmp_path):
+    import json
+
+    from kb_init.cli import main
+
+    _write_pair(tmp_path, insights_status=None)
+    (tmp_path / "manifest.json").write_text(json.dumps({"run_id": "r1"}),
+                                            encoding="utf-8")
+    assert main(["validate", str(tmp_path / "insights.md")]) == 7

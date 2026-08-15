@@ -116,16 +116,16 @@ def _run_insights_stage(
     staging: Path,
     docs: list,
     *,
-    counts: dict,
-    unresolved_links: list,
     index_status: str,
     corpus_provenance: str = "unknown",
 ) -> tuple[str, str | None]:
     """洞察阶段。失败必须在这里被吸收成状态——理由与索引阶段完全相同：
     rename 之前传播出去的任何异常都会让 finally 删掉 staging，清洗产物一并消失。
 
-    **不读 manifest**：本阶段跑在 `write_manifest` 之前，manifest 还没落盘。
-    需要的计数与断链由调用方把已经算好的值传进来。
+    调用前 staging 里已经有一份 **provisional manifest**，所以这里读 manifest
+    与读索引走的都是下游将来走的同一条路。早前的写法是给 `read_index()` 开一个
+    `trust_manifest=False` 的绕过参数——那是给公共函数装了个逃生门，
+    而这个项目的教训正是「只要留一条兜底路径，规则就会被它绕过」。
     """
     if index_status == "skipped":
         return "skipped", "no_index"
@@ -141,16 +141,18 @@ def _run_insights_stage(
             write_insights,
         )
         from kb_init.insights_md import render_markdown
+        from kb_init.manifest import read_manifest
 
         # 写盘后**读回**，走公共读取器：这条路径能抓到序列化、映射与版本边界上的
         # 问题，而 2C/2D/2E 走的正是这条路。只测内存路径的话，三个下游第一次
-        # 读文件时才会发现合同没兑现。
-        # 唯一合法的 trust_manifest=False：本阶段跑在 write_manifest 之前
-        index, _matrix = read_index(staging, trust_manifest=False)
+        # 读文件时才会发现合同没兑现。计数与断链也从 manifest 读，不在这里手搓
+        # 一个「像 manifest 的字典」——那等于给同一份事实开了第二个来源。
+        index, _matrix = read_index(staging)
+        manifest = read_manifest(staging)
         kept = [d for d in docs if d.status == "kept"]
         payload = build_insight_set(
             index,
-            {"counts": counts, "unresolved_links": unresolved_links, "documents": []},
+            manifest,
             {d.doc_id: d.body for d in kept},
             {d.doc_id: (d.title or "") for d in kept},
             corpus_provenance=corpus_provenance,
@@ -401,6 +403,16 @@ def run(
     splitter=None,
     corpus_provenance: str = "unknown",
 ) -> dict:
+    from kb_init.insights import CORPUS_PROVENANCE
+
+    if corpus_provenance not in CORPUS_PROVENANCE:
+        # 在**入口**校验：放到洞察阶段才抛的话，它会被那一层的异常吸收器
+        # 变成 insights_status=failed，程序化调用方拿不到 ValueError。
+        raise ValueError(
+            f"corpus_provenance 只能是 {CORPUS_PROVENANCE} 之一，"
+            f"得到 {corpus_provenance!r}"
+        )
+
     source = Path(source)
     out_dir = Path(out_dir)
     run_id = run_id or uuid.uuid4().hex[:12]
@@ -487,10 +499,18 @@ def run(
                 run_id=run_id, corpus_hash=corpus_hash,
             )
 
+        # provisional manifest：让洞察阶段读索引时走**和下游一模一样**的那条路
+        # （`read_index` 总要问 manifest）。它一定会被下面的最终版覆盖，
+        # 绝不会以 pending 状态发布出去——发布只发生在最后那次 rename。
+        write_manifest(
+            docs, staging, run_id=run_id, source=str(source),
+            unresolved_links=result.unresolved_links, skipped_inputs=collisions,
+            index_status=index_status, index_reason=index_reason,
+            insights_status="pending",
+        )
+
         insights_status, insights_reason = _run_insights_stage(
             staging, docs,
-            counts=summarize(docs),
-            unresolved_links=result.unresolved_links,
             index_status=index_status,
             corpus_provenance=corpus_provenance,
         )
