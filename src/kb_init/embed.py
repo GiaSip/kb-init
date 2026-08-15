@@ -68,8 +68,10 @@ class TokenSafeSplitter:
     1 字 1 token 的启发式：英文、代码、长符号串都可能在 400 字符内突破 512 token，
     而那正是这条硬约束要防的事。用启发式挡它等于没挡。
 
-    做法是从 `probe_chars` 起步、必要时二分收缩到不超限的最大片段——比逐字符
-    累加 token 少调用几个数量级的 tokenizer。
+    `probe_chars` 是**目标块长**，`max_tokens` 是**上限**——两者不是一回事。
+    曾经写过"在不超限的前提下尽量把块填满"，结果真实语料上块数从 1322 掉到 770，
+    簇从 5 个（含 3 个极干净的）退化成 2 个大杂烩：块越大，主题信号被摊得越平。
+    分块器的职责是保证不超限，不是尽量填满。
     """
 
     def __init__(
@@ -85,14 +87,7 @@ class TokenSafeSplitter:
         n = len(text)
         while pos < n:
             hi = min(pos + self._probe, n)
-            if self._count(text[pos:hi]) <= self._max_tokens:
-                # 还有余量且未到结尾时向后扩，避免把长文切得过碎
-                while hi < n:
-                    nxt = min(hi + self._probe, n)
-                    if self._count(text[pos:nxt]) > self._max_tokens:
-                        break
-                    hi = nxt
-            else:
+            if self._count(text[pos:hi]) > self._max_tokens:
                 lo, high = pos + 1, hi
                 while lo < high:                    # 二分找不超限的最大 end
                     mid = (lo + high + 1) // 2
@@ -116,6 +111,14 @@ def build_splitter(model_name: str = DEFAULT_MODEL):
         if tokenizer is None:
             raise AttributeError("该 fastembed 版本未暴露 tokenizer")
 
+        # **必须关掉 truncation**：tokenizer 默认截断到 512，于是 len(ids) 恒 ≤ 512，
+        # 计数函数永远报告"没超限"，分块器把整篇文档当成一块——正是这条硬约束要防的
+        # 静默截断，而且断言「每块 ≤512 token」在截断下恒真，测试也发现不了。
+        # 实测证据：287 篇语料，关之前切出 287 块，关之后切出 1300+ 块。
+        # 这里的 model 是 build_splitter 自己新建的实例，与推理用的实例无关，改它安全。
+        if hasattr(tokenizer, "no_truncation"):
+            tokenizer.no_truncation()
+
         def count(text: str) -> int:
             return len(tokenizer.encode(text).ids)
 
@@ -133,18 +136,34 @@ def build_splitter(model_name: str = DEFAULT_MODEL):
         )
 
 
-def _model_revision(model) -> str:
-    """取模型版本标识写进 method.model_revision，供可复现性比对。
+def model_revision(model_name: str = DEFAULT_MODEL) -> str:
+    """模型版本标识，写进 `method.model_revision` 供可复现性比对。
 
-    fastembed 各版本的 `model_description` 有时是 dataclass、有时是 dict，
-    取不到就返回空串——这是元数据，不该为了它让整个索引失败。
+    形如 `BAAI/bge-small-zh-v1.5@onnx/model.onnx`。取自 fastembed 的模型目录
+    而不是实例属性——实例上并没有 `model_description`，此前那版 getattr 兜底
+    会静默返回空串，等于这个字段一直是摆设。取不到时退回模型名：这是元数据，
+    不值得为它让整个索引失败，但也不能假装它有值。
     """
-    description = getattr(model, "model_description", None)
-    if description is None:
-        return ""
-    if isinstance(description, dict):
-        return str(description.get("model_file", ""))
-    return str(getattr(description, "model_file", ""))
+    try:
+        from fastembed import TextEmbedding
+
+        for entry in TextEmbedding.list_supported_models():
+            if entry.get("model") == model_name:
+                sources = entry.get("sources") or {}
+                repo = sources.get("hf") or model_name
+                return f"{repo}@{entry.get('model_file', '')}"
+    except Exception:
+        pass
+    return model_name
+
+
+def _fastembed_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return f"fastembed-{version('fastembed')}"
+    except Exception:
+        return "fastembed-unknown"
 
 
 class FastEmbedEmbedder:
@@ -163,7 +182,7 @@ class FastEmbedEmbedder:
             if self._progress:
                 self._progress({"event": "model_loading", "model": self.model_name})
             self._model = TextEmbedding(model_name=self.model_name)
-            self.revision = _model_revision(self._model)
+            self.revision = model_revision(self.model_name)
         return self._model
 
     def embed(self, texts: list[str]):

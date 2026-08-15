@@ -21,6 +21,28 @@ from kb_init.manifest import compute_corpus_hash, write_manifest
 from kb_init.parse import parse_file
 
 
+def _versions() -> dict:
+    """可复现性的版本边界：同样的输入只在同样的依赖版本下才保证同样的输出。
+
+    聚类结果会随 sklearn 版本变化，embedding 会随 fastembed / 模型文件变化——
+    不记下来，"可复现"就是一句无法验证的断言。
+    """
+    from kb_init import __version__
+    from kb_init.embed import _fastembed_version
+
+    try:
+        import sklearn
+
+        sklearn_version = sklearn.__version__
+    except Exception:
+        sklearn_version = "unknown"
+    return {
+        "kb_init": __version__,
+        "sklearn": sklearn_version,
+        "embedder_adapter": _fastembed_version(),
+    }
+
+
 def _run_index_stage(
     staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str
 ) -> tuple[str, str | None]:
@@ -33,7 +55,6 @@ def _run_index_stage(
     只接 `Exception`：`KeyboardInterrupt` / `SystemExit` 是 BaseException，必须透传，
     不能被伪装成"部分成功"。
     """
-    from kb_init import __version__
     from kb_init.chunk import chunk_documents
     from kb_init.cluster import Assignment, cluster_documents
     from kb_init.embed import pool_chunk_vectors
@@ -98,7 +119,7 @@ def _run_index_stage(
                 "decision_threshold": None,
             },
             time_axis=build_time_axis(dated, len(kept)),
-            versions={"kb_init": __version__},
+            versions=_versions(),
         )
         validate_index(index, [d.doc_id for d in kept])
         write_index(staging, index, matrix)

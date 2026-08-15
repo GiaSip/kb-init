@@ -72,10 +72,22 @@ def test_real_model_smoke():
     splitter, meta = build_splitter(DEFAULT_MODEL)
     assert meta["fallback_used"] is False, "真实模型下不该走降级分块"
 
-    # 真正要挡的是「400 字符启发式在英文/代码上失效」——用真 tokenizer 验证
-    long_code = "def f():\n    return 1\n" * 200
+    # 真正要挡的是「长文被整篇当成一块」。这里必须先关掉 tokenizer 的 truncation，
+    # 否则 len(ids) 恒 ≤512，断言恒真——这条测试曾经就是这么空跑的。
     from fastembed import TextEmbedding
 
     tokenizer = TextEmbedding(model_name=DEFAULT_MODEL).model.tokenizer
-    for start, end in splitter.split(long_code):
+    tokenizer.no_truncation()
+
+    long_code = "def f():\n    return 1\n" * 200
+    spans = splitter.split(long_code)
+    assert len(spans) > 1, "长文必须被切成多块，否则超出上限的部分会被静默截断"
+    for start, end in spans:
         assert len(tokenizer.encode(long_code[start:end]).ids) <= MAX_TOKENS
+
+    long_chinese = "这是一段很长的中文笔记内容。" * 200
+    zh_spans = splitter.split(long_chinese)
+    assert len(zh_spans) > 1
+    for start, end in zh_spans:
+        assert len(tokenizer.encode(long_chinese[start:end]).ids) <= MAX_TOKENS
+    assert "".join(long_chinese[s:e] for s, e in zh_spans) == long_chinese
