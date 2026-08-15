@@ -33,12 +33,12 @@
 
 - **R14 已定案**（2026-08-13 贾老师拍板）：v0.1 只走 `uvx`，**不同时维护两套实现**；宣传语不吹"零安装"，改为"装好 uv 后一条命令运行，无需自己装 Python"；首次运行体验按一等公民设计（进度 / 预估时间 / 模型下载可见）；GitHub Releases 单二进制列入 **v0.2 明确路线**
 
-## 下一步
+## 历史里程碑
 
-1. ~~验证 R1~~ ✅ 2026-08-13 完成，clone 源码逐条核实，三条断言全部成立（见 DESIGN §2.3）
-2. ~~走 writing-plans~~ ✅ Plan 1（核心管线，10 任务）已出：`docs/superpowers/plans/2026-08-13-core-pipeline.md`
-3. **执行 Plan 1** ← 当前。Plan 2（洞察与编译）待 Plan 1 完成后再写
-4. Plan 2 实施前先在 `Archive/Apple Notes` 上验 bge-small-zh 的真实聚类质量（R2 剩余部分）
+1. ~~验证 R1~~ ✅ 2026-08-13，clone 源码逐条核实，三条断言全部成立（见 DESIGN §2.3）
+2. ~~Plan 1 核心管线~~ ✅ 2026-08-14 合并 main
+3. ~~R2 聚类质量验收~~ ✅ 2026-08-14，结论见 DESIGN §13
+4. ~~2A 索引层~~ ✅ 2026-08-15 实现完毕
 
 ## 语料资产（已在手）
 
@@ -96,5 +96,9 @@ Notion 导出用的是 URL 编码的标准相对链接而非 wikilink，只处�
 
 ## 下一步
 
-**Plan 2**（洞察层 L2/L3 + Wrapped + CLAUDE.md 编译）。实施前先在 `Archive/Apple Notes`
-上验 bge-small-zh 的真实聚类质量（R2 剩余部分）。
+**2B — L2 洞察 + `insights.json` / `insights.md` 合同**。2A 已经把索引层的事实备齐
+（groups / assignments / residual / representatives / time_axis 条件门），2B 要决定的是
+**呈现策略**：主题数与洞察数如何解耦、residual 那 70% 讲成什么。
+
+⚠️ 2A spec §2.1 写死了一条回头条件：若 2B 出现「12–20 条洞察凑不满」「洞察全挤在 ≤2 个主题上」
+「residual 在第二份非贾老师语料上仍 >70%」中任一，回到 2A 加 halo 归属（方案 C）。
