@@ -64,3 +64,72 @@ def test_exit_code_0_when_everything_completes(tmp_path, monkeypatch):
 
     monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: _fake_summary())
     assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 0
+
+
+# ---------------- kb-init validate ----------------
+
+def _write_pair(tmp_path):
+    import json
+
+    from kb_init.insights_md import render_markdown
+
+    payload = {
+        "schema_version": "0.1", "run_id": "r1", "corpus_hash": "c1",
+        "counts": {"topic": 1, "residual": 0, "corpus": 0, "total": 1},
+        "presentation": {"group_refs": [],
+                         "truncated": {"shown": 1, "total": 1,
+                                       "omitted_group_refs": [], "omitted_docs": 0}},
+        "insights": [{"insight_id": "T1", "family": "topic",
+                      "kind": "topic_cluster", "canonical_text": "文本",
+                      "payload": {}, "evidence": {"doc_ids": [], "stat": None},
+                      "claude_md": None}],
+    }
+    (tmp_path / "insights.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "insights.md").write_text(render_markdown(payload), encoding="utf-8")
+    return payload
+
+
+def test_validate_accepts_a_matching_pair(tmp_path, capsys):
+    from kb_init.cli import main
+
+    _write_pair(tmp_path)
+    assert main(["validate", str(tmp_path / "insights.md")]) == 0
+    assert "1 条" in capsys.readouterr().out
+
+
+def test_validate_rejects_unknown_id_with_line_number(tmp_path, capsys):
+    from kb_init.cli import main
+
+    _write_pair(tmp_path)
+    path = tmp_path / "insights.md"
+    path.write_text(path.read_text(encoding="utf-8") + "\n- [x] `T9` 冒出来的\n",
+                    encoding="utf-8")
+    assert main(["validate", str(path)]) == 7
+    err = capsys.readouterr().err
+    assert "T9" in err and "行" in err
+
+
+def test_validate_reports_missing_json_clearly(tmp_path, capsys):
+    from kb_init.cli import main
+
+    _write_pair(tmp_path)
+    (tmp_path / "insights.json").unlink()
+    assert main(["validate", str(tmp_path / "insights.md")]) == 7
+    assert "insights.json" in capsys.readouterr().err
+
+
+def test_validate_requires_exactly_one_path(tmp_path):
+    from kb_init.cli import main
+
+    assert main(["validate"]) == 2
+
+
+def test_normal_run_still_works_after_adding_the_subcommand(tmp_path):
+    """加子命令最容易踩的坑：把原来的 `kb-init <source>` 用法弄坏。"""
+    from kb_init.cli import main
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.md").write_text("# a\n\n" + "内容内容内容 " * 60, encoding="utf-8")
+    assert main([str(src), "-o", str(tmp_path / "out"), "--no-index"]) == 0

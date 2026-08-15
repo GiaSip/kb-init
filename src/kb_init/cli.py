@@ -26,7 +26,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_command(md_path: str) -> int:
+    """`kb-init validate <insights.md>`：独立校验勾选清单与它的 json 真源。
+
+    退出码 7 而不是复用 6：6 是「这次运行的洞察没生成」，7 是「你手上这份清单
+    不合法」，下一步动作完全不同（重跑 vs 改文件）。
+    """
+    import json
+    from pathlib import Path
+
+    from kb_init.insights_md import InsightsValidationError, validate_markdown
+
+    md = Path(md_path)
+    json_path = md.with_name("insights.json")
+    if not md.exists():
+        print(f"错误：找不到 {md}", file=sys.stderr)
+        return 7
+    if not json_path.exists():
+        print(f"错误：同目录下找不到 insights.json（{json_path}）。"
+              f"校验需要两份文件配对。", file=sys.stderr)
+        return 7
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        validate_markdown(md.read_text(encoding="utf-8"), payload)
+    except InsightsValidationError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 7
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"错误：读取失败——{exc}", file=sys.stderr)
+        return 7
+    print(f"校验通过：{len(payload['insights'])} 条洞察全部对得上。")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    # 不用 argparse subparsers：现有用法 `kb-init <source>` 是位置参数，
+    # 改成子命令解析会把它弄坏（下面有一条测试专盯这个）。
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "validate":
+        if len(argv) != 2:
+            print("用法：kb-init validate <insights.md>", file=sys.stderr)
+            return 2
+        return _validate_command(argv[1])
+
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
