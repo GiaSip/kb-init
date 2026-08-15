@@ -96,6 +96,69 @@ def _versions(embedder=None) -> dict:
     }
 
 
+def _subdivide_flagged_groups(
+    doc_ids, matrix, assignments, method_dict, build_analysis, build_time_axis
+) -> list[dict]:
+    """2A′：把内聚度贴近 residual 基线的 group 细分成 analyses[1..]。
+
+    **`analyses[0]` 一个字节都不改。** 2A 合同要求同时保留「第一轮的 residual」
+    与「第二轮的 assigned」两套 disposition——回头编辑父分析会直接毁掉它。
+
+    这个函数由 `_run_index_stage` 在它的 try 内部调用，因此异常照常向上抛，
+    由那一层吸收成 index_status=failed 并回滚整个索引子事务。
+    """
+    import numpy as np
+
+    from kb_init import subdivide as sd
+
+    if not doc_ids:
+        return []
+
+    row_of = {d: matrix[i] for i, d in enumerate(doc_ids)}
+    members_by_group: dict[str, list[str]] = {}
+    for a in assignments:
+        for m in a.memberships:
+            members_by_group.setdefault(m.group_id, []).append(a.doc_id)
+    residual_ids = [a.doc_id for a in assignments if a.disposition == "residual"]
+
+    lifts = sd.group_lifts(members_by_group, residual_ids, row_of)
+    flagged = sd.flagged_groups(lifts)
+    if not flagged:
+        return []
+
+    baseline = sd.cohesion(
+        np.vstack([row_of[d] for d in residual_ids if d in row_of])
+    )
+    extra: list[dict] = []
+    for n, gid in enumerate(flagged, start=2):
+        child_groups, child_assignments = sd.subdivide_group(
+            gid, members_by_group[gid], row_of, baseline,
+            min_cluster_size=5, min_samples=5,
+        )
+        child_method = dict(method_dict)
+        child_method["params"] = {
+            **method_dict["params"],
+            "cluster_selection_method": "leaf",
+        }
+        extra.append(
+            build_analysis(
+                analysis_id=f"topics-{n:02d}",
+                parent_analysis_id="topics-01",
+                input_scope={
+                    "kind": "parent_group",
+                    "analysis_id": "topics-01",
+                    "group_id": gid,
+                },
+                groups=child_groups,
+                assignments=child_assignments,
+                method=child_method,
+                # 子分析不重算日期覆盖率：它是全局事实，记在根分析上就够了
+                time_axis=build_time_axis(0, len(members_by_group[gid])),
+            )
+        )
+    return extra
+
+
 def _run_index_stage(
     staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str
 ) -> tuple[str, str | None]:
@@ -119,11 +182,13 @@ def _run_index_stage(
         from kb_init.cluster import Assignment, cluster_documents
         from kb_init.embed import pool_chunk_vectors
         from kb_init.index import (
+            build_analysis,
             build_index,
             build_time_axis,
             validate_index,
             write_index,
         )
+        from kb_init.subdivide import COHESION_LIFT_MIN
 
         import numpy as np
 
@@ -176,29 +241,39 @@ def _run_index_stage(
             for d in kept
             if d.date_source not in ("unknown", "unresolved") and d.created
         }
+        method_dict = {
+            "family": "density",
+            "name": "hdbscan",
+            "model": model_name,
+            "model_revision": getattr(embedder, "revision", ""),
+            "params": {
+                "min_cluster_size": 5,
+                "min_samples": 5,
+                "metric": "euclidean",
+                # 参数不落盘等于产物隐瞒了自己是怎么来的
+                "cluster_selection_method": "eom",
+                "cohesion_lift_min": COHESION_LIFT_MIN,
+            },
+            "seed": 0,
+            "splitter": splitter_meta,
+            "pooling": "mean_l2",
+            "score_kind": "density_membership",
+            "score_direction": "higher_better",
+            "decision_threshold": None,
+        }
+
+        extra_analyses = _subdivide_flagged_groups(
+            doc_ids, matrix, assignments, method_dict, build_analysis, build_time_axis
+        )
+
         index = build_index(
             run_id=run_id,
             corpus_hash=corpus_hash,
             chunks=chunks,
             groups=groups,
             assignments=assignments,
-            method={
-                "family": "density",
-                "name": "hdbscan",
-                "model": model_name,
-                "model_revision": getattr(embedder, "revision", ""),
-                "params": {
-                    "min_cluster_size": 5,
-                    "min_samples": 5,
-                    "metric": "euclidean",
-                },
-                "seed": 0,
-                "splitter": splitter_meta,
-                "pooling": "mean_l2",
-                "score_kind": "density_membership",
-                "score_direction": "higher_better",
-                "decision_threshold": None,
-            },
+            method=method_dict,
+            extra_analyses=extra_analyses,
             time_axis=build_time_axis(
                 len(dated_by_doc),
                 len(kept),
