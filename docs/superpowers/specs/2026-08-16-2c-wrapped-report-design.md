@@ -140,8 +140,19 @@ allowlist 一次收敛。所以分享版的实现是**从零开始只放行列�
 1. **所有插值一律 HTML 转义**（`&<>"'`），且转义发生在**唯一一处**——
    模板里不允许出现未经该函数的插值；
 2. **报告不含任何 `<script>`、不含任何外链**（无 CDN 字体、无远程图片）；
-3. `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">`
-   —— 纵深防御，万一前两条被绕过，浏览器也不执行脚本。
+3. `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'">`
+   —— 纵深防御。`form-action` / `base-uri` 不是多余的：转义一旦失守，**不用 JS 也能外送**
+   （注入一个 `<form action=...>` 或改 `<base href>`），而 `default-src` 管不到这两个。
+
+**第四条，属于 CSS 上下文**：HTML 转义**不保护 CSS 语法**。报告里唯一进入 CSS 的值是
+条形的宽度百分比，它必须：
+
+- 由 `payload` 的数字算出，**不接受任何字符串插值**；
+- 钳位到 `[0, 100]` 并以固定格式输出（`f"{value:.1f}"`），非有限值（NaN / inf）一律
+  当作合同违例报错，不静默取 0——取 0 是猜。
+
+模板里除了这一个数字，**没有任何值进入 `style` 属性**。这条比「小心一点」有用，
+因为它是可测的。
 
 **测试必须配负例**：一条「转义函数被摘掉就会红」的断言，以及一条正例
 （正常内容不被过度转义成乱码）。§10.7 明确要求 `<script>` 这一项各测一次。
@@ -158,16 +169,53 @@ allowlist 一次收敛。所以分享版的实现是**从零开始只放行列�
 退出码 10 与 5 / 6 是同一族：**恢复动作不同就分开**——5 要重跑索引（要网络与模型），
 6 只差洞察，10 只差报告。
 
-`compile` 的写盘顺序（沿用 2D 已定的授权与锁机制，**不新造一套**）：
+### 7.1 私有版：写进 staging，原子性是白送的
+
+主 run 的私有版**写进 staging 目录**，随最后那一次 `staging.rename(out_dir)` 一起发布。
+于是它不需要任何 tmp / replace 逻辑——「整次运行原子」这条已有的机制直接覆盖它。
+
+阶段函数照抄 `_run_insights_stage` 的形状，一个字都不改动它的纪律：
+
+- 位置在洞察阶段之后、最终 `write_manifest` 之前；
+- **失败必须在阶段函数内被吸收成状态，绝不允许异常放出去**——放出去会穿到
+  `run()` 的 `finally`，把清洗产物、索引、洞察**一起删掉**。2A 与 2B 各埋过一次这个洞；
+- 清理半份产物的路径同样不许抛；清不掉就把 `report_reason` 记成 `io_failed`，
+  由 manifest 兜住「这份文件不算数」。
+
+`report_status` 取值与 `insights_status` 对齐：
+
+| 值 | 何时 | reason |
+|---|---|---|
+| `complete` | 报告已写进 staging | `null` |
+| `skipped` | 没有洞察可渲染 | `no_index` / `index_failed` / `insights_failed` |
+| `failed` | 渲染或写盘失败 | `render_failed` / `io_failed` |
+
+**只有 `failed` 才返回退出码 10。** `skipped` 不是失败——`--no-index` 本来就没有洞察，
+给它报个错等于说「你用错了」，而那是一条一等公民的通道。
+
+### 7.2 分享版：它不需要覆盖授权
+
+2D 为档案建了一整套授权机制（回执 + 哈希 + 拒符号链接），是因为档案落在
+`knowledge/` 里——**那个目录装着用户的笔记**，完全可能真有一篇叫 `CLAUDE.md`。
+
+`report.share.html` 落在 **`out_dir` 根目录**，而那里 100% 是工具自有产物
+（`index.json` / `insights.json` / `manifest.json` / `compile.json`）：语料笔记只会被
+清洗进 `knowledge/`，且 `out_dir` 非空时主 run 直接拒绝运行（退出码 1）。
+**碰撞面根本不存在，所以不给它套授权**——为一个不存在的风险加机制，
+本身就是一种谎。
+
+由此 compile 的顺序保持简单，**2D 的实现一行不改**：
 
 ```
-取锁 → 渲染档案与分享版（纯内存）→ 两者的覆盖授权都过 → 写分享版 → 写档案 → 写回执
+渲染档案与分享版（纯内存，渲染失败时一个字节都还没落）
+  → publish(档案)     ← 2D 原样：取锁 / 授权 / 原子替换 / 写回执
+  → 原子写分享版      ← tmp + os.replace，无授权
 ```
 
-- **两个文件共用同一份回执**：`compile.json` 同时记 `archive_sha256` 与 `share_sha256`。
-  一份回执描述两个文件，就不会出现「一个有主一个没主」；
-- 渲染全部在写盘之前完成：渲染失败时**一个字节都还没落**；
-- 分享版先于档案写：档案是那份「不可逆性最高」的产物（DESIGN §4.1），它最后落。
+- **回执继续只描述档案**，不记 `share_sha256`。让一份回执描述两个文件，就必须回答
+  「一个有主一个没主」怎么办；而分享版是**可重新生成的派生品**，它不需要有主。
+- 分享版写失败 → 退出码 4，**档案与回执完好**。恢复动作就是重跑 `compile`：
+  回执与档案对得上 ⇒ 授权通过 ⇒ 两个文件一起重新生成。**不会卡住**。
 
 ## 8. 架构
 
@@ -202,16 +250,19 @@ allowlist 一次收敛。所以分享版的实现是**从零开始只放行列�
 | `test_report_contains_no_generated_prose` | 报告里除模板常量外，不含任何不能追溯到 payload 的断言句（同 2D 的「一行都不能多」思路，用计数比对） |
 | `test_script_tag_in_title_is_escaped` | 标题含 `<script>` → 报告里不出现可执行标签，出现的是转义实体 |
 | `test_normal_text_is_not_over_escaped` | 负例的配对正例：正常中文/英文不被转义成乱码 |
-| `test_no_external_references` | 报告里不含 `http://` / `https://` / `src=` / `<script` |
+| `test_no_reference_constructs` | 报告里不含 `src=` / `href=` / `<script` / `@import` / `url(`。**判据是「制造引用的构造」而不是子串 `http`**——真实语料的证据标题里就含裸 URL，扫 `http` 会与「canonical_text 逐字显示」直接冲突，且那种 URL 只是被转义的文本，点不开 |
+| `test_bare_url_in_title_is_not_linkified` | 证据标题含裸 URL → 报告里它是纯文本，没有被自动变成链接 |
+| `test_bar_width_is_clamped_and_fixed_format` | 条形宽度只接受数字、钳位 0–100、固定小数位；NaN / inf → 报合同违例而不是静默取 0 |
 | `test_csp_meta_present` | CSP meta 存在且 `default-src 'none'` |
 | `test_share_omits_every_denied_field` | 参数化：证据标题 / doc_id / run_id / corpus_hash / naming.params 各自不出现在分享版里 |
 | `test_share_keeps_allowed_fields` | 配对正例：关键词与数字仍在，否则「全删掉」也能让上一条全绿 |
 | `test_share_only_contains_checked_items` | 取消勾选的条目不进分享版 |
 | `test_bar_scale_starts_at_zero` | 最大条与次大条的宽度比 == 篇数比（截断坐标轴即红） |
-| `test_report_failure_keeps_pipeline_products` | 私有版渲染抛错 → 清洗/索引/洞察产物仍在，退出码 10 |
-| `test_share_failure_writes_no_archive` | 分享版渲染失败 → 档案与回执一个字节都没写 |
-| `test_receipt_covers_both_files` | 回执同时记两个哈希，且都等于盘上文件的实际哈希 |
-| `test_share_report_refuses_to_overwrite_foreign_file` | 同名外来文件 → 拒绝覆盖，内容未变（沿用 2D 授权） |
+| `test_report_failure_keeps_pipeline_products` | 私有版渲染抛错 → 清洗/索引/洞察产物**全部仍在**，退出码 10 |
+| `test_report_cleanup_failure_still_does_not_raise` | 清理半份报告也失败 → 仍不抛，`report_reason == "io_failed"` |
+| `test_report_skipped_is_not_an_error` | `--no-index` → `report_status == "skipped"`，退出码 **0** |
+| `test_share_render_failure_writes_nothing` | 分享版**渲染**失败 → 档案与回执一个字节都没写（渲染在写盘之前） |
+| `test_share_write_failure_keeps_archive_and_is_rerunnable` | 分享版**写盘**失败 → 退出码 4，档案与回执完好，**再跑一次 compile 能成功**（不卡住） |
 
 **真实语料验收**（不进 CI）：两份语料各跑一遍完整链路，产出私有版与分享版，
 落仓库外；人工打开看。
