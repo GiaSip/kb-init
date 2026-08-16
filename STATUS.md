@@ -1,17 +1,20 @@
 # STATUS — kb-init
 
-> 最后更新：2026-08-16（2D compile 完成，第一份门面产物落地）
+> 最后更新：2026-08-16（2C Wrapped 完成，README 承诺的两样门面产物齐了）
 
 ## 当前阶段
 
 **Plan 1 已合并 main**（6 轮 Codex 终审，93 passed，Notion 死链 2/237）。
 **Plan 2 已拆成五个子项目**（2A 索引 → 2B L2 洞察 → 2D compile → 2C Wrapped → 2E L3）。
 **2A 索引层**（165 passed）、**2B 洞察层**（含前置 2A′，299 passed + 4 smoke，5 轮 Codex 终审）
-与 **2D compile**（368 passed + 5 smoke）已实现完毕，spec 与计划见 `docs/superpowers/`。
+、**2D compile** 与 **2C Wrapped**（471 passed + 6 smoke）已实现完毕，
+spec 与计划见 `docs/superpowers/`。
 
-**README 承诺的两样门面产物，第一样已经有了**：`kb-init compile` 产出的 `CLAUDE.md`
-在两份真实语料上都跑通（产物在仓库外 `~/Documents/assistant-output/kb-init-r2/`）。
-剩下 `report.html`（2C）。
+**README 承诺的两样门面产物都有了**：`kb-init compile` 产出的 `CLAUDE.md`，
+以及 `report.private.html` / `report.share.html`。两份真实语料上都跑通，
+产物在仓库外 `~/Documents/assistant-output/kb-init-r2/`。
+**DESIGN §4.2 的闭环到此才真正接上**——在 2C 之前，人肉 gate 只有一份枯燥的
+配置文件，而那正是这份设计当初判定行不通的东西。
 
 2A 期间两个改变设计的实测发现：
 1. **日期几乎不存在**——导出类语料的日期可解析率仅 5–6%（已维护库 43%），根因是导出包里就没有。
