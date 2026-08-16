@@ -102,6 +102,26 @@ def _validate_command(md_path: str) -> int:
     return 0
 
 
+SHARE_REPORT_NAME = "report.share.html"
+
+
+def _write_share_report(out_dir: Path, html: str) -> Path:
+    """原子写入 out_dir 根目录。不套档案那套覆盖授权，理由见调用处。"""
+    import os
+
+    target = out_dir / SHARE_REPORT_NAME
+    tmp = out_dir / f".{SHARE_REPORT_NAME}.tmp"
+    try:
+        tmp.unlink(missing_ok=True)          # 顺带堵掉「预置符号链接」那条写入通道
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(html.encode("utf-8"))
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return target
+
+
 def _compile_command(md_path: str) -> int:
     """`kb-init compile <insights.md>`：把勾选过的洞察编译成知识库的 CLAUDE.md。
 
@@ -197,11 +217,27 @@ def _compile_command(md_path: str) -> int:
 
     selections = parse_markdown(text_md)["selections"]
     try:
+        from kb_init.report import ReportContractError, render_share, share_keywords
+
         grouped = select_for_archive(payload, selections)
         verify_canonical_texts(grouped)
+        # 两份都先在内存里渲染完：渲染失败时一个字节都还没落盘。
+        archive_text = render_archive(payload, grouped)
+        share_html = render_share(payload, selections)
+        keywords = share_keywords(payload, selections)
+
         archive = publish(
-            md.parent, payload, render_archive(payload, grouped),
+            md.parent, payload, archive_text,
             [i["insight_id"] for _, items in grouped for i in items])
+        # 分享版落 out_dir 根目录，那里 100% 是工具自有产物（语料只进 knowledge/，
+        # 且 out_dir 非空时主 run 直接拒绝运行）——碰撞面不存在，所以不给它套
+        # 档案那套覆盖授权。为一个不存在的风险加机制，本身就是一种谎。
+        share_path = _write_share_report(md.parent, share_html)
+    except ReportContractError as exc:
+        # 报告渲染不出来 = insights.json 里的值渲染不了，与 canonical_text 对不上
+        # 是同一类问题，同样归 9。
+        print(f"错误：{exc}", file=sys.stderr)
+        return 9
     except ArchiveEmptyError as exc:
         # 8 而不是 0：什么都没写却返回成功，脚本会以为档案在那儿。
         print(f"错误：{exc}", file=sys.stderr)
@@ -220,6 +256,14 @@ def _compile_command(md_path: str) -> int:
     print(f"已写入 {archive}")
     print(f"  收录 {count} 条洞察，分 {len(grouped)} 节"
           f"（未勾选的、以及只进 Wrapped 的条目不在其中）")
+    print(f"已写入 {share_path}")
+    # 字段级 allowlist 拦不住**值**级泄露——关键词本身就来自正文，实测语料里
+    # 出现过账号 handle 被抽成关键词。能拦住的只有人的眼睛，而人得先看得到它们。
+    if keywords:
+        print(f"  它包含这些关键词，发出去之前请自己过一遍（{len(keywords)} 个）：")
+        print("    " + " · ".join(keywords))
+    else:
+        print("  它不含任何关键词。")
     return 0
 
 
@@ -303,6 +347,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 6
+    # 只有 failed 才报错。**skipped 不是失败**——`--no-index` 本来就没有洞察可渲染，
+    # 给它报个错等于说「你用错了」，而那是一条一等公民的通道。
+    if counts.get("report_status") == "failed":
+        print(
+            f"警告：清洗产物、索引与洞察都已写入，但报告未生成"
+            f"（{counts.get('report_reason')}）。勾选清单 insights.md 照常可用。",
+            file=sys.stderr,
+        )
+        return 10
+    if counts.get("report_status") == "complete":
+        print(f"报告：{Path(args.out) / 'report.private.html'}（双击打开看，再回到清单勾选）")
     return 0
 
 

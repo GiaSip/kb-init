@@ -180,6 +180,46 @@ def _run_insights_stage(
         return "failed", reason
 
 
+REPORT_NAME = "report.private.html"
+
+
+def _run_report_stage(staging: Path, *, insights_status: str) -> tuple[str, str | None]:
+    """报告阶段。形状与纪律**照抄** `_run_insights_stage`：
+
+    **异常绝不允许放出去。** 放出去会穿到 `run()` 的 `finally`，把清洗产物、索引、
+    洞察一起删掉——2A 与 2B 各埋过一次这个洞，代价是「毁掉三样完好的产物，
+    去换删干净一样坏产物」。
+
+    报告写进 staging，随最后那一次 rename 一起发布，所以它**不需要**自己的
+    tmp/replace 逻辑：「整次运行原子」这条已有的机制直接覆盖它。
+    """
+    if insights_status == "skipped":
+        return "skipped", "no_index"
+    if insights_status != "complete":
+        return "skipped", "insights_failed"
+
+    path = staging / REPORT_NAME
+    try:
+        import json
+
+        from kb_init.report import render_private
+
+        payload = json.loads((staging / "insights.json").read_text(encoding="utf-8"))
+        path.write_text(render_private(payload), encoding="utf-8")
+        return "complete", None
+    except Exception as exc:
+        reason = "io_failed" if isinstance(exc, OSError) else "render_failed"
+        # 清理半份报告的路径同样不许抛。清不掉就把真相记进 manifest：
+        # report_status=failed 就是「别信这个文件」。
+        try:
+            path.unlink(missing_ok=True)
+            if path.exists():
+                reason = "io_failed"
+        except Exception:
+            reason = "io_failed"
+        return "failed", reason
+
+
 def _subdivide_flagged_groups(
     doc_ids, matrix, assignments, method_dict, build_analysis, build_time_axis
 ) -> list[dict]:
@@ -515,6 +555,9 @@ def run(
             corpus_provenance=corpus_provenance,
         )
 
+        report_status, report_reason = _run_report_stage(
+            staging, insights_status=insights_status)
+
         write_manifest(
             docs,
             staging,
@@ -526,6 +569,8 @@ def run(
             index_reason=index_reason,
             insights_status=insights_status,
             insights_reason=insights_reason,
+            report_status=report_status,
+            report_reason=report_reason,
         )
 
         # 返回值在 commit **之前**算好。放在 rename 之后算，一旦 summarize 抛错
@@ -535,6 +580,8 @@ def run(
         summary["index_reason"] = index_reason
         summary["insights_status"] = insights_status
         summary["insights_reason"] = insights_reason
+        summary["report_status"] = report_status
+        summary["report_reason"] = report_reason
 
         # 临时目录在 commit 前严格清掉：放到 return 时清理，一旦清理失败就会在
         # 产物已发布之后抛异常，制造"命令报错但产物已发布"；而删不干净又照常发布，

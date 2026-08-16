@@ -503,3 +503,82 @@ def test_identity_missing_on_both_sides_reports_9_not_traceback(tmp_path, field)
     (tmp_path / "manifest.json").write_text(
         json.dumps(man, ensure_ascii=False), encoding="utf-8")
     assert main(["compile", str(tmp_path / "insights.md")]) == 9
+
+
+# ---------------- 2C 报告 ----------------
+
+def test_exit_10_when_report_failed(tmp_path, monkeypatch):
+    from kb_init.cli import main
+
+    summary = _fake_summary()
+    summary["report_status"] = "failed"
+    summary["report_reason"] = "render_failed"
+    monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: summary)
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 10
+
+
+def test_exit_0_when_report_skipped(tmp_path, monkeypatch):
+    """skipped 不是失败：--no-index 本来就没有洞察可渲染，
+    给它报个错等于说「你用错了」，而那是一条一等公民的通道。"""
+    from kb_init.cli import main
+
+    summary = _fake_summary()
+    summary["report_status"] = "skipped"
+    summary["report_reason"] = "no_index"
+    monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: summary)
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 0
+
+
+def test_compile_writes_share_report_and_prints_its_keywords(tmp_path, capsys):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    share = tmp_path / "report.share.html"
+    assert share.exists()
+    html = share.read_text(encoding="utf-8")
+    assert "标题一" not in html, "证据标题不该进分享版"
+    out = capsys.readouterr().out
+    assert "report.share.html" in out
+    assert "甲" in out and "乙" in out, "分享版包含的关键词必须打印给用户过目"
+
+
+def test_share_render_failure_writes_nothing(tmp_path, monkeypatch):
+    """渲染在写盘之前：渲染失败时档案与回执一个字节都没写。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    monkeypatch.setattr(
+        "kb_init.report.render_share",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("渲染炸了")))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    assert not (tmp_path / "knowledge" / "CLAUDE.md").exists()
+    assert not (tmp_path / "compile.json").exists()
+    assert not (tmp_path / "report.share.html").exists()
+
+
+def test_share_write_failure_keeps_archive_and_is_rerunnable(tmp_path, monkeypatch):
+    """分享版写盘失败 → 4，档案与回执完好，且**再跑一次能成功**（不卡住）。"""
+    import kb_init.cli as mod
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    real = mod._write_share_report
+    monkeypatch.setattr(
+        mod, "_write_share_report",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("盘满了")))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    assert (tmp_path / "knowledge" / "CLAUDE.md").exists()
+    assert (tmp_path / "compile.json").exists()
+
+    monkeypatch.setattr(mod, "_write_share_report", real)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert (tmp_path / "report.share.html").exists()
+
+
+def test_share_report_leaves_no_tmp(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    main(["compile", str(tmp_path / "insights.md")])
+    assert not (tmp_path / ".report.share.html.tmp").exists()
