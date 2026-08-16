@@ -141,11 +141,21 @@ def verify_canonical_texts(grouped: Grouped) -> None:
                               item["payload"], "")
             try:
                 expected = render(insight)
-            except (KeyError, TypeError) as exc:
+            except Exception as exc:
+                # 捕获面必须宽：原先只抓 KeyError/TypeError，而 length_profile
+                # 的 `:g` 格式化在坏 payload 上抛的是 ValueError——漏出去就是
+                # 给普通用户一段 traceback。
+                #
+                # ⚠️ 措辞刻意**不下结论**。渲染器抛异常有两种可能：这份 json 是
+                # 旧版产的，或者渲染器自己有 bug。原先的文案一口咬定是前者，
+                # 那是在猜——而猜错的代价是把工具的 bug 伪装成用户的数据问题，
+                # 让人去重跑一个永远跑不好的流程。
                 raise ArchiveContractError(
-                    f"{item['insight_id']} 的 kind「{item['kind']}」"
-                    f"本版渲染器算不出来（{exc}）——这份 insights.json 不是"
-                    f"当前版本产出的，请用当前版本重跑一次。") from exc
+                    f"算不出 {item['insight_id']}（kind={item['kind']}）的正文："
+                    f"{type(exc).__name__}: {exc}。"
+                    f"可能是这份 insights.json 不是当前版本产出的（用当前版本"
+                    f"重跑一次即可），也可能是 kb-init 自己的缺陷——"
+                    f"若重跑后仍然如此，请带着这条信息报 issue。") from exc
             if expected != item["canonical_text"]:
                 raise ArchiveContractError(
                     f"{item['insight_id']} 的 canonical_text 与 payload 对不上。"
@@ -213,6 +223,22 @@ def _read_receipt(out_dir) -> dict | None:
     return receipt if isinstance(receipt, dict) else None
 
 
+def _write_exclusive(path, data: bytes) -> None:
+    """先 unlink 再 O_EXCL 建，绝不写进一个已经存在的路径。
+
+    直接 `write_bytes` 会**跟随符号链接**：谁在 knowledge/ 里预置一个
+    `.CLAUDE.md.tmp` 符号链接，我们就替他写坏了链接指向的文件。
+    `unlink` 删的是链接本身而不是它指向的东西，所以这两步合起来既清掉了
+    上次崩溃留下的残骸，也堵掉了这条写入通道。
+    """
+    import os
+
+    path.unlink(missing_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
 def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) -> None:
     import json
     import os
@@ -229,9 +255,14 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) 
         "insight_ids": list(insight_ids),
     }
     tmp = out_dir / f".{RECEIPT_NAME}.tmp"
-    tmp.write_text(json.dumps(receipt, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, out_dir / RECEIPT_NAME)
+    try:
+        _write_exclusive(
+            tmp, json.dumps(receipt, ensure_ascii=False, indent=2).encode("utf-8"))
+        os.replace(tmp, out_dir / RECEIPT_NAME)
+    finally:
+        # replace 失败时 tmp 会留下；下次运行虽然会先 unlink 它，但一个
+        # 半成品文件躺在输出目录里本身就会让人误判发生了什么。
+        tmp.unlink(missing_ok=True)
 
 
 def _authorize(target, out_dir, payload: dict) -> None:
@@ -266,6 +297,30 @@ def _authorize(target, out_dir, payload: dict) -> None:
             f"拒绝覆盖。想重新生成就先删掉它。")
 
 
+def check_archive_dir(out_dir) -> None:
+    """`knowledge/` 必须已存在、是目录、且不是符号链接。
+
+    **不创建**：能走到 compile 就说明流水线跑完过，这个目录本来就该在。
+    造一个只装着档案、没有任何知识的 `knowledge/`，是在造一个撒谎的产物。
+
+    这个检查单独暴露出来，是为了让 CLI 能在**进入任何洞察 gate 之前**先问一次
+    ——否则「目录被删了」会先撞上「你一条都没勾」（8）或别的码，诊断指错方向。
+    """
+    from pathlib import Path
+
+    archive_dir = Path(out_dir) / ARCHIVE_DIR
+    if archive_dir.is_symlink():
+        # 目标文件拒绝跟随符号链接，目录这一层同理——否则整份档案会被写到
+        # 链接指向的地方去，而调用者以为它在输出目录里。
+        raise OSError(
+            f"{archive_dir} 是一个符号链接。档案不写进符号链接指向的目录——"
+            f"请确认 -o 指的是 kb-init 自己生成的输出目录。")
+    if not archive_dir.is_dir():
+        raise OSError(
+            f"找不到 {archive_dir}（或它不是目录）。档案要和清洗产物放在一起，"
+            f"而这个目录本该由上一步生成——请确认 -o 指的是完整的输出目录。")
+
+
 def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
     """授权 → 原子写档案 → 写回执。返回档案路径。
 
@@ -277,13 +332,8 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
     from pathlib import Path
 
     out_dir = Path(out_dir)
+    check_archive_dir(out_dir)
     archive_dir = out_dir / ARCHIVE_DIR
-    if not archive_dir.is_dir():
-        # 不创建：能走到 compile 就说明流水线跑完过，knowledge/ 本来就该在。
-        # 造一个只装着档案、没有任何知识的 knowledge/，是在造一个撒谎的产物。
-        raise OSError(
-            f"找不到 {archive_dir}（或它不是目录）。档案要和清洗产物放在一起，"
-            f"而这个目录本该由上一步生成——请确认 -o 指的是完整的输出目录。")
 
     lock = out_dir / LOCK_NAME
     try:
@@ -294,14 +344,16 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
         raise OSError(
             f"另一个 compile 正在这个目录里运行（锁文件 {lock}）。"
             f"确认没有之后，删掉这个锁文件再重跑。") from exc
-    os.close(fd)
 
     target = archive_dir / ARCHIVE_NAME
     tmp = archive_dir / f".{ARCHIVE_NAME}.tmp"
     try:
+        # os.close 放进 try：它抛异常的概率极低，但放在外面就意味着
+        # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
+        os.close(fd)
         _authorize(target, out_dir, payload)
         data = text.encode("utf-8")
-        tmp.write_bytes(data)
+        _write_exclusive(tmp, data)
         try:
             if target.exists():
                 os.replace(tmp, target)
@@ -309,7 +361,6 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
                 # 新建走 link：原子且独占——「检查时不存在」与「创建」之间
                 # 不留窗口，别的进程抢先建了就会抛而不是被我们覆盖。
                 os.link(tmp, target)
-                tmp.unlink()
         finally:
             tmp.unlink(missing_ok=True)
         _write_receipt(out_dir, payload, _sha256(data), insight_ids)

@@ -445,3 +445,29 @@ def test_source_dir_named_compile_still_works(tmp_path, monkeypatch):
     src.mkdir()
     monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: _fake_summary())
     assert main([str(src), "-o", str(tmp_path / "out")]) == 0
+
+
+def test_missing_knowledge_dir_reports_4_even_when_nothing_checked(tmp_path):
+    """顺序守卫：目录被删 + 一条都没勾。
+
+    若 knowledge/ 的检查拖到最后才做，这里会先撞上「你一条都没勾」（8），
+    把「目录不见了」说成「你没勾选」——诊断指向完全错误的方向。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    _uncheck(tmp_path, "T1")
+    (tmp_path / "knowledge").rmdir()
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+
+
+def test_knowledge_symlink_reports_4(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "knowledge").rmdir()
+    (tmp_path / "knowledge").symlink_to(elsewhere, target_is_directory=True)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    assert not (elsewhere / "CLAUDE.md").exists()

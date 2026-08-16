@@ -10,11 +10,14 @@ import pytest
 from kb_init.claude_md import (
     ArchiveContractError,
     ArchiveEmptyError,
+    ARCHIVE_NAME,
+    ARCHIVE_TITLE,
     ArchiveOverwriteError,
     LOCK_NAME,
     RECEIPT_NAME,
     KNOWN_SECTIONS,
     SECTIONS,
+    check_archive_dir,
     check_structure,
     identity_marker,
     publish,
@@ -420,3 +423,118 @@ def test_receipt_write_failure_keeps_archive(tmp_path, monkeypatch):
         publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
     assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
     assert not (out / LOCK_NAME).exists()
+
+
+# ---------------- 「不合成内容」这条合同的正面检测 ----------------
+
+def test_archive_contains_nothing_beyond_the_contract():
+    """逐字断言只保证「该在的在」，不保证「不该在的不在」。
+
+    2D 的核心合同是**纯管道、不合成内容**——一个偷偷多写两句总结的实现，
+    在「包含 canonical_text」这条断言下照样全绿。所以这里反过来查：
+    产物里每一行都必须能追溯到 SECTIONS 表或某条洞察，一行都不能多。
+    """
+    payload = _payload(_insight("T1"), _insight("R1", section="coverage"))
+    grouped = select_for_archive(payload, _all_checked(payload))
+    allowed = {ARCHIVE_TITLE, identity_marker(payload)}
+    allowed |= {f"## {h}" for _, h, _ in SECTIONS}
+    allowed |= {f"> {lead}" for _, _, lead in SECTIONS if lead}
+    for _, items in grouped:
+        for item in items:
+            allowed.add(f"- {item['canonical_text']}")
+            titles = item["payload"].get("evidence_titles") or []
+            if titles:
+                allowed.add("  证据：" + " · ".join(
+                    " ".join(t.split()) for t in titles))
+
+    unexplained = [ln for ln in render_archive(payload, grouped).splitlines()
+                   if ln.strip() and ln not in allowed and not ln.startswith("<!--")]
+    assert unexplained == [], f"产物里有追溯不到来源的内容：{unexplained}"
+
+
+# ---------------- 失败路径的残骸 ----------------
+
+def _tmp_leftovers(out_dir):
+    return sorted(p.name for p in (out_dir / "knowledge").iterdir()
+                  if p.name.startswith(".")) + \
+        sorted(p.name for p in out_dir.iterdir() if p.name.endswith(".tmp"))
+
+
+def test_no_tmp_left_behind_on_refusal(tmp_path):
+    """只测成功路径的残骸检查抓不到失败路径的残骸。"""
+    out = _out_dir(tmp_path)
+    (out / "knowledge" / "CLAUDE.md").write_text("外来文件", encoding="utf-8")
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert _tmp_leftovers(out) == []
+
+
+def test_no_tmp_left_behind_on_receipt_failure(tmp_path, monkeypatch):
+    import kb_init.claude_md as mod
+
+    out = _out_dir(tmp_path)
+    monkeypatch.setattr(mod, "_write_receipt",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert _tmp_leftovers(out) == []
+
+
+def test_preexisting_tmp_symlink_is_not_followed(tmp_path):
+    """预置一个 .CLAUDE.md.tmp 符号链接就能借我们的手写坏别人的文件。
+
+    直接 write_bytes 会跟随符号链接；先 unlink 再 O_EXCL 建才堵得住
+    （unlink 删的是链接本身，不是它指向的东西）。
+    """
+    out = _out_dir(tmp_path)
+    victim = tmp_path / "victim.md"
+    victim.write_text("别人的文件", encoding="utf-8")
+    (out / "knowledge" / ".CLAUDE.md.tmp").symlink_to(victim)
+
+    publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert victim.read_text(encoding="utf-8") == "别人的文件"
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
+
+
+def test_stale_tmp_file_does_not_block(tmp_path):
+    """上次崩溃留下的残骸不该让工具从此打不开。"""
+    out = _out_dir(tmp_path)
+    (out / "knowledge" / f".{ARCHIVE_NAME}.tmp").write_text("残骸", encoding="utf-8")
+    publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
+
+
+def test_archive_dir_symlink_is_refused(tmp_path):
+    """目标文件拒绝跟随符号链接，目录这一层同理。"""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "knowledge").symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(OSError):
+        check_archive_dir(out)
+    assert not (elsewhere / "CLAUDE.md").exists()
+
+
+def test_check_archive_dir_accepts_a_real_dir(tmp_path):
+    """配对正例：一个恒抛错的 check_archive_dir 也能让上面两条全绿。"""
+    check_archive_dir(_out_dir(tmp_path))
+
+
+def test_render_failure_does_not_leak_traceback_type(tmp_path):
+    """渲染器在坏 payload 上抛的不止 KeyError/TypeError。
+
+    length_profile 的 `:g` 格式化遇到字符串抛的是 ValueError——捕获面窄一点，
+    普通用户就会收到一段 traceback。
+    """
+    item = {"insight_id": "C9", "family": "corpus", "kind": "length_profile",
+            "payload": {"count": 1, "median_chars": "不是数字",
+                        "shortest_chars": 1, "longest_chars": 2},
+            "canonical_text": "随便", "evidence": {"doc_ids": [], "stat": None},
+            "claude_md": {"section": "coverage"}}
+    payload = _payload(item)
+    grouped = select_for_archive(payload, _all_checked(payload))
+    with pytest.raises(ArchiveContractError) as caught:
+        verify_canonical_texts(grouped)
+    # 措辞不许一口咬定是「json 太旧」——也可能是工具自己的缺陷。
+    assert "也可能是" in str(caught.value)

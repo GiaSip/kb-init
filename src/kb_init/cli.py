@@ -118,6 +118,7 @@ def _compile_command(md_path: str) -> int:
         ArchiveContractError,
         ArchiveEmptyError,
         ArchiveOverwriteError,
+        check_archive_dir,
         check_structure,
         publish,
         render_archive,
@@ -137,6 +138,13 @@ def _compile_command(md_path: str) -> int:
     except _BundleError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 7
+    try:
+        # 早于所有洞察 gate：目录被删掉时若拖到最后才发现，用户会先看到
+        # 「你一条都没勾」（8）或「json 对不上」（9），诊断指向完全错误的方向。
+        check_archive_dir(md.parent)
+    except OSError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 4
 
     manifest = bundle["manifest"]
     try:
