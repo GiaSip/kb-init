@@ -28,7 +28,7 @@
 - 新增退出码：**8**（无可归档条目）/ **9**（`insights.json` 与本版代码不一致）。
   复用：**1**（拒绝覆盖）/ **4**（读写失败、锁被占用、`knowledge/` 缺失）。
 - 档案正文**逐字**等于 `canonical_text`，不重新措辞；导语只能陈述对任何语料恒真的管道事实。
-- 开源卫生：真实笔记标题与本机绝对路径不许进仓库；提交前 `git grep "/Users/" -- ':!CLAUDE.md'` 必须为空。
+- 开源卫生：真实笔记标题与本机绝对路径不许进仓库；提交前 `git grep -nE "/Users/[A-Za-z0-9]" -- ':!CLAUDE.md'` 必须为空。
 - 全量回归基线：**299 passed + 4 smoke**，不许退步。
 
 ## File Structure
@@ -380,7 +380,7 @@ git commit -m "feat: kb-init compile 子命令与退出码 8/9"
 - [ ] **Step 5: 开源卫生检查 + 提交**
 
 ```bash
-git grep "/Users/" -- ':!CLAUDE.md'   # 必须为空
+git grep -nE "/Users/[A-Za-z0-9]" -- ':!CLAUDE.md'   # 必须为空
 git add -A && git commit -m "docs: 2D 的用法、退出码与验收记录"
 ```
 
