@@ -237,3 +237,211 @@ def test_validate_refuses_when_manifest_top_level_is_not_an_object(tmp_path):
         _write_pair(tmp_path, insights_status=None)
         (tmp_path / "manifest.json").write_text(payload, encoding="utf-8")
         assert main(["validate", str(tmp_path / "insights.md")]) == 7, payload
+
+
+# ---------------- kb-init compile ----------------
+
+def _bundle_insight(iid, family, kind, payload, claude_md):
+    from kb_init.insights import Insight, render
+
+    return {"insight_id": iid, "family": family, "kind": kind,
+            "payload": payload,
+            "canonical_text": render(Insight(iid, family, kind, payload, "")),
+            "evidence": {"doc_ids": [], "stat": None},
+            "claude_md": claude_md}
+
+
+def _write_bundle(tmp_path, *, insights=None, manifest_over=None, schema="0.1"):
+    """比 _write_pair 多两样：knowledge/ 目录，以及 manifest 里的身份字段。"""
+    import json
+
+    from kb_init.insights_md import render_markdown
+
+    if insights is None:
+        # canonical_text 由**真渲染器**生成，不手写：手写一份就等于给它开了
+        # 第二个生成器，而 compile 会（正确地）把两者不等判为 9。
+        insights = [
+            _bundle_insight(
+                "T1", "topic", "topic_cluster",
+                {"doc_count": 9, "keywords": ["甲", "乙"], "share_of_kept": 0.03,
+                 "evidence_titles": ["标题一", "标题二"]},
+                {"section": "focus_areas"}),
+            _bundle_insight(
+                "C1", "corpus", "retention",
+                {"total": 100, "kept": 40, "dropped_stub": 60,
+                 "dropped_duplicate": 0},
+                None),
+        ]
+    payload = {
+        "schema_version": schema, "run_id": "r1", "corpus_hash": "c1",
+        "counts": {"topic": 1, "residual": 0, "corpus": 1, "total": 2},
+        "presentation": {"group_refs": [],
+                         "truncated": {"shown": 1, "total": 1,
+                                       "omitted_group_refs": [], "omitted_docs": 0}},
+        "insights": insights,
+    }
+    (tmp_path / "knowledge").mkdir(exist_ok=True)
+    (tmp_path / "insights.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    (tmp_path / "insights.md").write_text(render_markdown(payload), encoding="utf-8")
+    man = {"insights_status": "complete", "insights_reason": None,
+           "run_id": "r1", "corpus_hash": "c1"}
+    man.update(manifest_over or {})
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(man, ensure_ascii=False), encoding="utf-8")
+    return payload
+
+
+def _uncheck(tmp_path, *ids):
+    path = tmp_path / "insights.md"
+    text = path.read_text(encoding="utf-8")
+    for i in ids:
+        text = text.replace(f"- [x] `{i}`", f"- [ ] `{i}`")
+    path.write_text(text, encoding="utf-8")
+
+
+def _archive(tmp_path):
+    return tmp_path / "knowledge" / "CLAUDE.md"
+
+
+def test_compile_happy_path_writes_archive(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    out = _archive(tmp_path).read_text(encoding="utf-8")
+    assert "## 关注领域" in out
+    assert "- 这 9 篇里最具区分度的词是 甲 · 乙 — 占 kept 3.0%" in out
+    assert "读入 100 篇" not in out, "corpus 族勾着也不该进档案"
+    assert (tmp_path / "compile.json").exists()
+
+
+@pytest.mark.parametrize("bad", [
+    None,                                    # manifest 缺失
+    "{不是 json",                             # 损坏
+    '{"other": 1}',                          # 没有 insights_status
+    '[]',                                    # 顶层不是对象
+])
+def test_compile_manifest_gate_four_states(tmp_path, bad):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    path = tmp_path / "manifest.json"
+    if bad is None:
+        path.unlink()
+    else:
+        path.write_text(bad, encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 7
+    assert not _archive(tmp_path).exists()
+
+
+@pytest.mark.parametrize("field", ["run_id", "corpus_hash"])
+def test_compile_identity_mismatch_with_manifest(tmp_path, field):
+    """manifest 与 json 不是同一次运行的产物 → 9（Codex 审 #2）。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path, manifest_over={field: "别的"})
+    assert main(["compile", str(tmp_path / "insights.md")]) == 9
+    assert not _archive(tmp_path).exists()
+
+
+def test_compile_schema_version_mismatch(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path, schema="0.9")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 9
+
+
+def test_stale_json_reports_9_not_7(tmp_path):
+    """顺序纪律的守卫（Codex 审 #4）：旧 json 配一份与之匹配的 md。
+
+    md 与 json 完全对得上，validate_markdown 一定过；若版本 gate 排在它后面，
+    这里会先撞上别的错误码。真正的原因是 json 太旧，修复动作在工具手上。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path, schema="0.0.1")
+    assert main(["validate", str(tmp_path / "insights.md")]) == 0, (
+        "前提：这份 md 与 json 是匹配的，7 无从谈起")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 9
+
+
+def test_compile_unknown_section_unchecked_reports_9_not_8(tmp_path):
+    """§5.1 的守卫：唯一可归档条目是未知 section 且**未勾选**。
+
+    若结构 gate 晚于按勾选过滤，这里会走到「没有可归档条目」而报 8，
+    把「工具不认识这一节」说成「你一条都没勾」。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path, insights=[
+        {"insight_id": "T1", "family": "topic", "kind": "topic_cluster",
+         "canonical_text": "未来的一条", "payload": {},
+         "evidence": {"doc_ids": [], "stat": None},
+         "claude_md": {"section": "blind_spots"}}])
+    _uncheck(tmp_path, "T1")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 9
+    assert not _archive(tmp_path).exists()
+
+
+def test_compile_zero_archivable_writes_nothing(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    _uncheck(tmp_path, "T1")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 8
+    assert not _archive(tmp_path).exists()
+
+
+def test_compile_refuses_overwrite(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    _archive(tmp_path).write_text("我自己的一篇笔记", encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 1
+    assert _archive(tmp_path).read_text(encoding="utf-8") == "我自己的一篇笔记"
+
+
+def test_compile_rerun_is_idempotent(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+
+
+def test_compile_missing_knowledge_dir(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    (tmp_path / "knowledge").rmdir()
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    assert not (tmp_path / "knowledge").exists()
+
+
+def test_compile_tampered_canonical_text_reports_9(tmp_path):
+    import json
+
+    from kb_init.cli import main
+
+    payload = _write_bundle(tmp_path)
+    payload["insights"][0]["canonical_text"] = "我自己改的文案"
+    (tmp_path / "insights.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 9
+
+
+def test_compile_usage_error_without_file(tmp_path):
+    from kb_init.cli import main
+
+    assert main(["compile"]) == 2
+
+
+def test_source_dir_named_compile_still_works(tmp_path, monkeypatch):
+    """一个真叫 compile 的目录仍按 source 处理——新子命令不许弄坏位置参数用法。"""
+    from kb_init.cli import main
+
+    src = tmp_path / "compile"
+    src.mkdir()
+    monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: _fake_summary())
+    assert main([str(src), "-o", str(tmp_path / "out")]) == 0
