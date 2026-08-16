@@ -242,6 +242,22 @@ ARCHIVE_NAME = "CLAUDE.md"
 RECEIPT_SCHEMA_VERSION = "0.1"
 
 
+def _encode(text: str, what: str) -> bytes:
+    """UTF-8 编码失败要归到退出码 9，不能漏成 traceback。
+
+    `"\ud800"` 这类孤立代理项是合法的 Python 字符串、过得了所有 isinstance 检查，
+    却编码不了——而 `UnicodeEncodeError` 是 `ValueError` 的子类，不是 `OSError`，
+    CLI 那边的 `except OSError` 接不住它。json.loads 能从 `"\\ud800"` 转义里
+    造出这种字符串，所以它进得来。
+    """
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ArchiveContractError(
+            f"{what}里有编码不了的字符（{exc}）——insights.json 里含孤立代理项一类"
+            f"的非法文本，请用当前版本重跑一次。") from exc
+
+
 def _sha256(data: bytes) -> str:
     import hashlib
 
@@ -253,7 +269,10 @@ def _read_receipt(out_dir) -> dict | None:
 
     try:
         receipt = json.loads((out_dir / RECEIPT_NAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
+        # RecursionError：足够深的嵌套 JSON 能让 json.loads 爆栈，而它既不是
+        # OSError 也不是 ValueError——漏出去就绕过了整张退出码表。
+        # 读不出回执一律当「没有回执」处理，也就是**拒绝覆盖**，方向是安全的。
         return None
     return receipt if isinstance(receipt, dict) else None
 
@@ -291,8 +310,8 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) 
     }
     tmp = out_dir / f".{RECEIPT_NAME}.tmp"
     try:
-        _write_exclusive(
-            tmp, json.dumps(receipt, ensure_ascii=False, indent=2).encode("utf-8"))
+        _write_exclusive(tmp, _encode(json.dumps(receipt, ensure_ascii=False,
+                                                 indent=2), "回执"))
         os.replace(tmp, out_dir / RECEIPT_NAME)
     finally:
         # replace 失败时 tmp 会留下；下次运行虽然会先 unlink 它，但一个
@@ -406,7 +425,7 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
         # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
         os.close(fd)
         _authorize(target, out_dir, payload)
-        data = text.encode("utf-8")
+        data = _encode(text, "档案正文")
         try:
             # 写 tmp 放进这个 try：写到一半失败（磁盘满、被打断）同样会
             # 留下半份 .tmp，而残骸会让下一个人误判发生过什么。

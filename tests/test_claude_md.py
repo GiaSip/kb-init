@@ -142,6 +142,23 @@ def test_unknown_section_fails_even_when_unchecked():
         check_structure(payload)
 
 
+@pytest.mark.parametrize("field", ["run_id", "corpus_hash", "schema_version"])
+@pytest.mark.parametrize("bad", [None, "", 1, ["r1"]])
+def test_each_meta_field_is_checked_independently(field, bad):
+    """三个元字段各测一遍。
+
+    只测其中一个的话，从校验循环里删掉另外两个仍然全绿——一个只覆盖部分分支的
+    测试组，对没覆盖的那部分等于不存在。
+    """
+    payload = _payload(_insight("T1"))
+    if bad is None:
+        del payload[field]
+    else:
+        payload[field] = bad
+    with pytest.raises(ArchiveContractError):
+        check_structure(payload)
+
+
 def test_insights_must_be_a_list():
     with pytest.raises(ArchiveContractError):
         check_structure({"schema_version": "0.1", "run_id": "r1",
@@ -715,9 +732,7 @@ def test_refusal_diagnosis_distinguishes_our_own_interrupted_run(tmp_path):
     None,
     "字符串",
     {"insights": []},                                    # 缺全部元字段
-    {"run_id": "r1", "corpus_hash": "c1", "insights": []},   # 缺 schema_version
-    {"run_id": "", "corpus_hash": "c1", "schema_version": "0.1", "insights": []},
-    {"run_id": 1, "corpus_hash": "c1", "schema_version": "0.1", "insights": []},
+    {"run_id": "r1", "corpus_hash": "c1", "schema_version": "0.1"},  # 缺 insights
 ])
 def test_malformed_root_payload_fails_closed(payload):
     """顶层与元字段也归结构 gate 管。
@@ -727,3 +742,35 @@ def test_malformed_root_payload_fails_closed(payload):
     """
     with pytest.raises(ArchiveContractError):
         check_structure(payload)
+
+
+def test_lone_surrogate_in_text_fails_closed(tmp_path):
+    """孤立代理项过得了所有 isinstance 检查，却编码不了。
+
+    UnicodeEncodeError 是 ValueError 的子类不是 OSError，CLI 的 except OSError
+    接不住它——漏出去就是一段 traceback。
+    """
+    out = _out_dir(tmp_path)
+    with pytest.raises(ArchiveContractError):
+        publish(out, _payload(_insight("T1")), "正文 \ud800", ["T1"])
+    assert not (out / "knowledge" / "CLAUDE.md").exists()
+    assert not (out / LOCK_NAME).exists()
+
+
+def test_lone_surrogate_in_insight_id_fails_closed(tmp_path):
+    """ID 里的孤立代理项要到写回执时才炸——那时档案已经写下去了。"""
+    out = _out_dir(tmp_path)
+    with pytest.raises(ArchiveContractError):
+        publish(out, _payload(_insight("T1")), "正文", ["T1\ud800"])
+    assert not (out / LOCK_NAME).exists()
+
+
+def test_unreadable_receipt_is_treated_as_absent(tmp_path):
+    """回执读不出来（损坏 / 爆栈）一律当「没有回执」→ 拒绝覆盖，方向安全。"""
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    publish(out, payload, "内容 A", ["T1"])
+    (out / RECEIPT_NAME).write_text("[" * 20000, encoding="utf-8")
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, payload, "内容 B", ["T1"])
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
