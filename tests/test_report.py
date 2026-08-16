@@ -5,7 +5,12 @@
 """
 import pytest
 
-from kb_init.report import ReportContractError, bar_width, esc
+from kb_init.report import (
+    ReportContractError,
+    bar_width,
+    esc,
+    render_private,
+)
 
 
 # ---------------- 转义 ----------------
@@ -71,3 +76,116 @@ def test_bar_width_accepts_plain_numbers():
     """配对正例：一个恒抛错的实现也能让上面那组负例全绿。"""
     assert bar_width(1, 2) == "50.0"
     assert bar_width(1.5, 3) == "50.0"
+
+
+# ---------------- 私有版渲染 ----------------
+
+def _insight(iid, family="topic", kind="topic_cluster", **over):
+    item = {
+        "insight_id": iid, "family": family, "kind": kind,
+        "payload": {"keywords": ["排版", "typography"], "doc_count": 9,
+                    "share_of_kept": 0.031,
+                    "evidence_titles": ["标题一", "带  多余  空格"]},
+        "canonical_text": f"{iid} 的断言句",
+        "evidence": {"doc_ids": [], "stat": None},
+        "claude_md": {"section": "focus_areas"},
+    }
+    item.update(over)
+    return item
+
+
+def _payload(*insights, **top):
+    out = {"schema_version": "0.1", "run_id": "r1", "corpus_hash": "c1",
+           "counts": {"topic": 1, "residual": 0, "corpus": 0, "total": 1},
+           "insights": list(insights) or [_insight("T1")]}
+    out.update(top)
+    return out
+
+
+def _corpus(iid="C1"):
+    return _insight(iid, family="corpus", kind="retention",
+                    payload={"total": 620, "kept": 287, "dropped_stub": 333,
+                             "dropped_duplicate": 0},
+                    canonical_text=f"{iid} 读入 620 篇，留下 287 篇",
+                    claude_md=None)
+
+
+def test_every_insight_appears_with_its_id():
+    """呈现层与操作层唯一的接缝：报告不印短 ID，用户看完回到清单找不到对应哪条。"""
+    payload = _payload(_insight("T1"), _insight("T2"), _corpus("C1"))
+    out = render_private(payload)
+    for iid in ("T1", "T2", "C1"):
+        assert iid in out
+
+
+def test_assertive_text_is_canonical_verbatim():
+    payload = _payload(_insight("T1", canonical_text="这 29 篇里最具区分度的词是 甲 · 乙"))
+    assert "这 29 篇里最具区分度的词是 甲 · 乙" in render_private(payload)
+
+
+def test_script_tag_in_title_is_escaped():
+    item = _insight("T1")
+    item["payload"]["evidence_titles"] = ["<script>alert(1)</script>"]
+    out = render_private(_payload(item))
+    assert "<script>alert(1)" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_script_tag_in_keyword_is_escaped():
+    """关键词同样来自语料，同样是攻击面——只测标题会漏掉半边。"""
+    item = _insight("T1")
+    item["payload"]["keywords"] = ["<img src=x onerror=alert(1)>"]
+    out = render_private(_payload(item))
+    assert "<img" not in out
+
+
+def test_canonical_text_is_escaped_too():
+    item = _insight("T1", canonical_text="<b>加粗</b>的断言")
+    out = render_private(_payload(item))
+    assert "<b>加粗</b>" not in out and "&lt;b&gt;" in out
+
+
+def test_bare_url_in_title_is_not_linkified():
+    """真实语料的证据标题里就含裸 URL。它必须是纯文本，不能被自动变成链接。"""
+    item = _insight("T1")
+    item["payload"]["evidence_titles"] = ["https://example.com/p/abc123"]
+    out = render_private(_payload(item))
+    assert "example.com" in out
+    assert "href=" not in out
+
+
+def test_no_reference_constructs():
+    """判据是「制造引用的构造」而不是子串 http——真实标题里就含裸 URL，
+    扫 http 会与「canonical_text 逐字显示」直接冲突，而被转义的 URL 点不开。"""
+    out = render_private(_payload(_insight("T1"), _corpus()))
+    for construct in ("src=", "href=", "<script", "@import", "url(", "<iframe", "<form"):
+        assert construct not in out, construct
+
+
+def test_csp_meta_present():
+    out = render_private(_payload(_insight("T1")))
+    for directive in ("default-src 'none'", "style-src 'unsafe-inline'",
+                      "form-action 'none'", "base-uri 'none'"):
+        assert directive in out, directive
+
+
+def test_next_step_block_present():
+    """报告是验收界面。看完不知道该干什么，闭环照样在人那一步断掉。"""
+    out = render_private(_payload(_insight("T1")))
+    assert "insights.md" in out and "compile" in out
+
+
+def test_sections_follow_family_order():
+    payload = _payload(_corpus("C1"),
+                       _insight("R1", family="residual", kind="fragment_zone"),
+                       _insight("T1"))
+    out = render_private(payload)
+    assert out.index("主题") < out.index("碎片区") < out.index("语料")
+
+
+def test_bar_width_appears_only_in_style_attribute():
+    """条形宽度是唯一进 CSS 的值——如果它出现在别处，说明模板漏了转义边界。"""
+    out = render_private(_payload(_insight("T1")))
+    import re
+    for value in re.findall(r'style="([^"]*)"', out):
+        assert re.fullmatch(r"width:\s*\d+\.\d%", value), value
