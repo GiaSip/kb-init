@@ -575,3 +575,82 @@ def test_provisional_manifest_is_also_finalised_when_insights_fail(tmp_path, mon
     run(_shaped(tmp_path), out, embedder=BlobEmbedder(), run_id="t")
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["insights_status"] == "failed"
+
+
+# ---------------- 2C 报告阶段 ----------------
+
+def _fake_report_corpus(tmp_path):
+    src = tmp_path / "src"
+    _corpus(src)
+    return src
+
+
+def test_report_written_into_staging_and_published(tmp_path, monkeypatch):
+    from kb_init.pipeline import run
+
+    out = tmp_path / "out"
+    counts = run(_fake_report_corpus(tmp_path), out, run_id="rep-1",
+                 embedder=FakeEmbedder(dim=8))
+    assert counts["report_status"] == "complete"
+    assert (out / "report.private.html").exists()
+
+
+def test_report_failure_keeps_all_prior_products(tmp_path, monkeypatch):
+    """硬不变量 #2：报告失败不许带走清洗产物、索引与洞察。"""
+    import kb_init.pipeline as mod
+    from kb_init.pipeline import run
+
+    def boom(*a, **k):
+        raise ValueError("渲染炸了")
+
+    monkeypatch.setattr("kb_init.report.render_private", boom)
+    out = tmp_path / "out"
+    counts = run(_fake_report_corpus(tmp_path), out, run_id="rep-2",
+                 embedder=FakeEmbedder(dim=8))
+    assert counts["report_status"] == "failed"
+    assert counts["report_reason"] == "render_failed"
+    assert (out / "knowledge").is_dir()
+    assert (out / "index.json").exists()
+    assert (out / "insights.json").exists()
+    assert (out / "insights.md").exists()
+    assert not (out / "report.private.html").exists()
+
+
+def test_report_stage_never_raises_even_if_cleanup_fails(tmp_path, monkeypatch):
+    """清理也失败时仍不抛——抛出去就会穿到 run() 的 finally。"""
+    from kb_init.pipeline import _run_report_stage
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "insights.json").write_text("{不是 json", encoding="utf-8")
+    status, reason = _run_report_stage(staging, insights_status="complete")
+    assert status == "failed" and reason == "render_failed"
+
+
+def test_report_skipped_without_index(tmp_path):
+    from kb_init.pipeline import run
+
+    out = tmp_path / "out"
+    counts = run(_fake_report_corpus(tmp_path), out, run_id="rep-3", no_index=True)
+    assert counts["report_status"] == "skipped"
+    assert counts["report_reason"] == "no_index"
+    assert not (out / "report.private.html").exists()
+
+
+def test_report_skipped_when_insights_failed(tmp_path):
+    from kb_init.pipeline import _run_report_stage
+
+    assert _run_report_stage(tmp_path, insights_status="failed") == (
+        "skipped", "insights_failed")
+
+
+def test_report_reason_does_not_relabel_index_failure(tmp_path):
+    """索引失败被记成 no_index 就是产物在撒谎——看 manifest 排障的人会去查
+    一个根本没发生的事。"""
+    from kb_init.pipeline import _run_report_stage
+
+    assert _run_report_stage(tmp_path, insights_status="skipped",
+                             insights_reason="index_failed") == (
+        "skipped", "index_failed")
+    assert _run_report_stage(tmp_path, insights_status="skipped",
+                             insights_reason="no_index") == ("skipped", "no_index")

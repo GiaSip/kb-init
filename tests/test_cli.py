@@ -503,3 +503,228 @@ def test_identity_missing_on_both_sides_reports_9_not_traceback(tmp_path, field)
     (tmp_path / "manifest.json").write_text(
         json.dumps(man, ensure_ascii=False), encoding="utf-8")
     assert main(["compile", str(tmp_path / "insights.md")]) == 9
+
+
+# ---------------- 2C 报告 ----------------
+
+def test_exit_10_when_report_failed(tmp_path, monkeypatch):
+    from kb_init.cli import main
+
+    summary = _fake_summary()
+    summary["report_status"] = "failed"
+    summary["report_reason"] = "render_failed"
+    monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: summary)
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 10
+
+
+def test_exit_0_when_report_skipped(tmp_path, monkeypatch):
+    """skipped 不是失败：--no-index 本来就没有洞察可渲染，
+    给它报个错等于说「你用错了」，而那是一条一等公民的通道。"""
+    from kb_init.cli import main
+
+    summary = _fake_summary()
+    summary["report_status"] = "skipped"
+    summary["report_reason"] = "no_index"
+    monkeypatch.setattr("kb_init.pipeline.run", lambda *a, **k: summary)
+    assert main([str(tmp_path), "-o", str(tmp_path / "out")]) == 0
+
+
+def test_compile_writes_share_report_and_prints_its_keywords(tmp_path, capsys):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    share = tmp_path / "report.share.html"
+    assert share.exists()
+    html = share.read_text(encoding="utf-8")
+    assert "标题一" not in html, "证据标题不该进分享版"
+    out = capsys.readouterr().out
+    assert "report.share.html" in out
+    assert "甲" in out and "乙" in out, "分享版包含的关键词必须打印给用户过目"
+
+
+def test_share_render_failure_writes_nothing(tmp_path, monkeypatch):
+    """渲染在写盘之前：渲染失败时档案与回执一个字节都没写。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    monkeypatch.setattr(
+        "kb_init.report.render_share",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("渲染炸了")))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    assert not (tmp_path / "knowledge" / "CLAUDE.md").exists()
+    assert not (tmp_path / "compile.json").exists()
+    assert not (tmp_path / "report.share.html").exists()
+
+
+def test_share_write_failure_keeps_archive_and_is_rerunnable(tmp_path, monkeypatch):
+    """分享版写盘失败 → 4，档案与回执完好，且**再跑一次能成功**（不卡住）。"""
+    import kb_init.cli as mod
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    real = mod._write_share_report
+    monkeypatch.setattr(
+        mod, "_write_share_report",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("盘满了")))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    assert (tmp_path / "knowledge" / "CLAUDE.md").exists()
+    assert (tmp_path / "compile.json").exists()
+
+    monkeypatch.setattr(mod, "_write_share_report", real)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert (tmp_path / "report.share.html").exists()
+
+
+def test_share_report_leaves_no_tmp(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    main(["compile", str(tmp_path / "insights.md")])
+    assert not (tmp_path / ".report.share.html.tmp").exists()
+
+
+def test_refusal_warns_about_the_stale_share_report(tmp_path, capsys):
+    """compile 拒绝产出时，必须提醒目录里还躺着上一次的分享版。
+
+    用户取消勾选全部 → 退 8 什么都不写 → 上一次那份还在标准路径上，
+    里面正是他刚撤掉的条目。**不删**（那是上一次的完好产物，删它撞硬不变量 #2），
+    但不能不说：分享版是专门用来发出去的，档案没有这个问题，它有。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    share = tmp_path / "report.share.html"
+    assert share.exists()
+
+    _uncheck(tmp_path, "T1")
+    capsys.readouterr()
+    assert main(["compile", str(tmp_path / "insights.md")]) == 8
+    err = capsys.readouterr().err
+    assert "上一次" in err and "report.share.html" in err
+    assert share.exists(), "不删——那是上一次成功运行的完好产物"
+
+
+def test_no_stale_warning_when_there_is_no_share_report(tmp_path, capsys):
+    """配对正例：没有旧分享版时不许瞎提醒，否则这条提示很快就没人看了。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    _uncheck(tmp_path, "T1")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 8
+    assert "上一次" not in capsys.readouterr().err
+
+
+def test_share_report_is_replaced_not_appended_on_rerun(tmp_path):
+    """重跑之后，上一次勾选留下的内容不能还在分享版里。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path, insights=[
+        _bundle_insight("T1", "topic", "topic_cluster",
+                        {"doc_count": 9, "keywords": ["独有关键词甲"],
+                         "share_of_kept": 0.03, "evidence_titles": []},
+                        {"section": "focus_areas"}),
+        _bundle_insight("T2", "topic", "topic_cluster",
+                        {"doc_count": 4, "keywords": ["独有关键词乙"],
+                         "share_of_kept": 0.01, "evidence_titles": []},
+                        {"section": "focus_areas"}),
+    ])
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    share = tmp_path / "report.share.html"
+    assert "独有关键词乙" in share.read_text(encoding="utf-8")
+
+    _uncheck(tmp_path, "T2")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    text = share.read_text(encoding="utf-8")
+    assert "独有关键词甲" in text
+    assert "独有关键词乙" not in text, "取消勾选之后它不该还在分享版里"
+
+
+@pytest.mark.parametrize("break_it,expected", [
+    ("manifest", 7),
+    ("schema", 9),
+])
+def test_stale_share_warning_covers_other_failure_codes(tmp_path, capsys,
+                                                        break_it, expected):
+    """提醒必须覆盖**每一个**非 0 出口。只覆盖 8/1 等于漏了一半。"""
+    import json
+
+    from kb_init.cli import main
+
+    payload = _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert (tmp_path / "report.share.html").exists()
+
+    if break_it == "manifest":
+        (tmp_path / "manifest.json").write_text("{坏了", encoding="utf-8")
+    else:
+        payload["schema_version"] = "9.9"
+        (tmp_path / "insights.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["compile", str(tmp_path / "insights.md")]) == expected
+    assert "上一次" in capsys.readouterr().err
+
+
+def test_share_write_failure_says_the_archive_is_fine(tmp_path, monkeypatch, capsys):
+    """笼统报「写入失败」会让人以为整件事都没成，去重跑一个已经完成的步骤。"""
+    import kb_init.cli as mod
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    monkeypatch.setattr(mod, "_write_share_report",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("盘满了")))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    err = capsys.readouterr().err
+    assert "档案已写入" in err and "分享版" in err
+    assert (tmp_path / "knowledge" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("cmd", ["validate", "compile"])
+def test_missing_path_reports_not_found_not_usage_error(tmp_path, cmd, capsys):
+    """路径打错时报「用法错误」是在指错方向：用法是对的，错的是文件不在。
+
+    用户会去检查命令怎么写，而不是去看路径——报错码指错方向，人就会做错事。
+    """
+    from kb_init.cli import main
+
+    assert main([cmd, str(tmp_path / "没有这个文件.md")]) == 7
+    assert "找不到" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("cmd", ["validate", "compile"])
+def test_bare_subcommand_still_reports_usage(tmp_path, cmd, capsys):
+    """配对正例：真的用法错误（没给参数）仍然是 2，不能被上一条吃掉。"""
+    from kb_init.cli import main
+
+    assert main([cmd]) == 2
+    assert "用法" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h", "--version"])
+def test_subcommand_with_a_flag_is_not_treated_as_a_missing_path(tmp_path, flag,
+                                                                  capsys):
+    """`kb-init compile --help` 不该被报成「找不到 --help」。
+
+    这是三审那条分流引入的回归：以 - 开头的参数是选项不是路径。
+    """
+    from kb_init.cli import main
+
+    assert main(["compile", flag]) == 2
+    assert "找不到" not in capsys.readouterr().err
+
+
+def test_missing_path_diagnosis_does_not_depend_on_cwd(tmp_path, monkeypatch,
+                                                        capsys):
+    """当前目录里碰巧有个叫 compile 的东西时，诊断不该变。
+
+    依赖 CWD 内容的行为差异是最难查的一类 bug：同一条命令在两个目录里给出
+    两种回答，而用户不会想到去看当前目录里有什么。
+    """
+    from kb_init.cli import main
+
+    (tmp_path / "compile").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert main(["compile", "没有这个文件.md"]) == 7
+    assert "找不到" in capsys.readouterr().err

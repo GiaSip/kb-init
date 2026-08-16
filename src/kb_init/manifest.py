@@ -34,6 +34,8 @@ def write_manifest(
     index_reason: str | None = None,
     insights_status: str = "skipped",
     insights_reason: str | None = None,
+    report_status: str = "skipped",
+    report_reason: str | None = None,
 ) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -53,6 +55,8 @@ def write_manifest(
         # 洞察层与索引层分开记：只看「有没有 insights.json」分不清
         # skipped（没索引）/ failed（索引在但洞察挂了）/ 旧版本产物。
         "insights_status": insights_status,
+        "report_status": report_status,
+        "report_reason": report_reason,
         "insights_reason": insights_reason,
         "documents": [
             {

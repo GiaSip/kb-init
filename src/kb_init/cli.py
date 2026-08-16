@@ -102,7 +102,65 @@ def _validate_command(md_path: str) -> int:
     return 0
 
 
+SHARE_REPORT_NAME = "report.share.html"
+
+
+def _write_share_report(out_dir: Path, html: str) -> Path:
+    """原子写入 out_dir 根目录。不套档案那套覆盖授权，理由见调用处。
+
+    **先删旧的再写新的**：这一步是隐私要求，不是洁癖。写失败时若把上一次的
+    分享版留在标准路径上，用户以为那是最新的就发出去了——而他这次取消勾选的
+    条目还在里面。宁可没有，也不能留一份「他以为已经撤掉了」的分享版。
+
+    tmp 用随机名（`mkstemp`）：固定名会让两个并发的 compile 互删对方的临时文件，
+    有可能发布出半写的 HTML；随机名 + 原子 replace 则最差也只是「谁后写谁赢」，
+    而分享版是可重新生成的派生品，这个结果可以接受。
+    """
+    import os
+    import tempfile
+
+    target = out_dir / SHARE_REPORT_NAME
+    target.unlink(missing_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{SHARE_REPORT_NAME}.", dir=out_dir)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(html.encode("utf-8"))
+        os.replace(tmp, target)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return target
+
+
+def _warn_if_stale_share_report(out_dir: Path) -> None:
+    """compile 没能产出新的分享版时，提醒用户目录里还躺着旧的那份。
+
+    **不删**：那是上一次成功运行的完好产物，删它撞「失败不许带走已完成的产物」。
+    但也不能不说：分享版是**专门用来发出去**的，而它反映的是上一次的勾选——
+    用户取消勾选之后 compile 报了错，他很可能以为「那份已经不算数了」。
+    档案没有这个问题（它给本机的 agent 读），分享版有。
+    """
+    if (out_dir / SHARE_REPORT_NAME).exists():
+        print(f"注意：{out_dir / SHARE_REPORT_NAME} 还是**上一次**生成的，"
+              f"反映的是上一次的勾选。这次没有产出新的分享版——"
+              f"发出去之前请确认它是你想要的那一版，或者先删掉它。",
+              file=sys.stderr)
+
+
 def _compile_command(md_path: str) -> int:
+    """把 `_compile` 包起来，**在唯一的出口**统一提醒旧分享版。
+
+    早先只在退出码 8 / 1 两处提醒，而 4 / 7 / 9 同样会留下上一次的分享版——
+    提醒漏了一半等于没提醒：用户偏偏会在报错那次以为「这次没生成，那份还是旧的吧」，
+    也偏偏可能不这么想。放在唯一出口才不会漏。
+    """
+    code = _compile(md_path)
+    if code != 0:
+        _warn_if_stale_share_report(Path(md_path).parent)
+    return code
+
+
+def _compile(md_path: str) -> int:
     """`kb-init compile <insights.md>`：把勾选过的洞察编译成知识库的 CLAUDE.md。
 
     gate 顺序不是随便排的（2D spec §5）：**版本与身份 gate 必须早于
@@ -197,11 +255,35 @@ def _compile_command(md_path: str) -> int:
 
     selections = parse_markdown(text_md)["selections"]
     try:
+        from kb_init.report import ReportContractError, render_share, share_keywords
+
         grouped = select_for_archive(payload, selections)
         verify_canonical_texts(grouped)
+        # 两份都先在内存里渲染完：渲染失败时一个字节都还没落盘。
+        archive_text = render_archive(payload, grouped)
+        share_html = render_share(payload, selections)
+        keywords = share_keywords(payload, selections)
+
         archive = publish(
-            md.parent, payload, render_archive(payload, grouped),
+            md.parent, payload, archive_text,
             [i["insight_id"] for _, items in grouped for i in items])
+        # 分享版落 out_dir 根目录，那里 100% 是工具自有产物（语料只进 knowledge/，
+        # 且 out_dir 非空时主 run 直接拒绝运行）——碰撞面不存在，所以不给它套
+        # 档案那套覆盖授权。为一个不存在的风险加机制，本身就是一种谎。
+        try:
+            share_path = _write_share_report(md.parent, share_html)
+        except OSError as exc:
+            # 档案已经写成了。笼统报一句「写入失败」会让人以为整件事都没成，
+            # 于是去重跑一个其实已经完成的步骤，或者干脆以为档案也没写。
+            print(f"错误：档案已写入 {archive}，但分享版没写成（{exc}）。"
+                  f"档案可以照常用；再跑一次 compile 就能把分享版补上。",
+                  file=sys.stderr)
+            return 4
+    except ReportContractError as exc:
+        # 报告渲染不出来 = insights.json 里的值渲染不了，与 canonical_text 对不上
+        # 是同一类问题，同样归 9。
+        print(f"错误：{exc}", file=sys.stderr)
+        return 9
     except ArchiveEmptyError as exc:
         # 8 而不是 0：什么都没写却返回成功，脚本会以为档案在那儿。
         print(f"错误：{exc}", file=sys.stderr)
@@ -220,6 +302,14 @@ def _compile_command(md_path: str) -> int:
     print(f"已写入 {archive}")
     print(f"  收录 {count} 条洞察，分 {len(grouped)} 节"
           f"（未勾选的、以及只进 Wrapped 的条目不在其中）")
+    print(f"已写入 {share_path}")
+    # 字段级 allowlist 拦不住**值**级泄露——关键词本身就来自正文，实测语料里
+    # 出现过账号 handle 被抽成关键词。能拦住的只有人的眼睛，而人得先看得到它们。
+    if keywords:
+        print(f"  它包含这些关键词，发出去之前请自己过一遍（{len(keywords)} 个）：")
+        print("    " + " · ".join(keywords))
+    else:
+        print("  它不含任何关键词。")
     return 0
 
 
@@ -234,6 +324,22 @@ def main(argv: list[str] | None = None) -> int:
     if (len(argv) == 2 and argv[0] in subcommands
             and Path(argv[1]).is_file()):
         return subcommands[argv[0]](argv[1])
+    if (len(argv) == 2 and argv[0] in subcommands
+            and not argv[1].startswith("-")          # `compile --help` 不是路径
+            and not Path(argv[1]).exists()):
+        # 形状与上面那条分支保持一致：两个参数、第二个像路径时，argv[0] 就是子命令。
+        # 早先这里还多一个 `not Path(argv[0]).exists()`，于是当前目录里碰巧有个
+        # 叫 compile 的东西时，这条分流会被跳过、落回「用法错误」并漏掉旧分享版
+        # 提醒。那个条件是给**单参数**场景防「劫持一个真叫 compile 的目录」用的，
+        # 在这里既拦不住什么，又制造了一个依赖 CWD 内容的行为差异。
+        # 路径打错时报「用法错误」是在指错方向：用法明明是对的，错的是那个文件
+        # 不在。用户会去检查命令怎么写，而不是去看路径——**报错码指错方向，
+        # 人就会做错事**，这与 7 / 9 分开的理由是同一条。
+        print(f"错误：找不到 {argv[1]}", file=sys.stderr)
+        # 路径打错但目录对（最常见的那种手误）时，旧分享版照样躺在那儿。
+        # 这个提醒只在那个文件真的存在时才会打印，所以不会误伤无关目录。
+        _warn_if_stale_share_report(Path(argv[1]).parent)
+        return 7
     if argv and argv[0] in subcommands and not Path(argv[0]).exists():
         print(f"用法：kb-init {argv[0]} <insights.md>", file=sys.stderr)
         return 2
@@ -303,6 +409,17 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 6
+    # 只有 failed 才报错。**skipped 不是失败**——`--no-index` 本来就没有洞察可渲染，
+    # 给它报个错等于说「你用错了」，而那是一条一等公民的通道。
+    if counts.get("report_status") == "failed":
+        print(
+            f"警告：清洗产物、索引与洞察都已写入，但报告未生成"
+            f"（{counts.get('report_reason')}）。勾选清单 insights.md 照常可用。",
+            file=sys.stderr,
+        )
+        return 10
+    if counts.get("report_status") == "complete":
+        print(f"报告：{Path(args.out) / 'report.private.html'}（双击打开看，再回到清单勾选）")
     return 0
 
 

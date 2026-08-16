@@ -237,3 +237,40 @@ def test_compile_produces_an_archive_on_real_corpus(tmp_path):
     # 开源卫生 + 隐私：产物里不许出现本机绝对路径
     assert "/Users/" not in archive
     assert (out / "compile.json").exists()
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
+def test_reports_on_real_corpus(tmp_path):
+    """端到端：私有版随主 run 发布，分享版随 compile 产出。
+
+    合成语料测不出真实形态——真实证据标题带 emoji、整段话、裸 URL，
+    而这三样正好都是转义与「不自动变链接」要处理的。
+    """
+    import json
+
+    from kb_init.cli import main
+
+    out = tmp_path / "out"
+    counts = run(APPLE, out, run_id="acceptance-apple-report")
+    assert counts["report_status"] == "complete"
+
+    private = (out / "report.private.html").read_text(encoding="utf-8")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+    for item in payload["insights"]:
+        assert item["insight_id"] in private, item["insight_id"]
+        assert item["canonical_text"] in private or \
+            item["canonical_text"].replace("&", "&amp;") in private
+    assert "<script" not in private and "href=" not in private
+    assert "/Users/" not in private
+
+    assert main(["compile", str(out / "insights.md")]) == 0
+    share = (out / "report.share.html").read_text(encoding="utf-8")
+    # 分享版不得含任何真实笔记标题
+    titles = [t for i in payload["insights"]
+              for t in (i["payload"].get("evidence_titles") or []) if len(t) > 6]
+    assert titles, "空列表会让下面的断言恒真"
+    for title in titles:
+        assert title not in share, title
+    assert payload["run_id"] not in share
+    assert payload["corpus_hash"] not in share
