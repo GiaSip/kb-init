@@ -597,19 +597,29 @@ def test_write_failure_midway_leaves_no_tmp(tmp_path, monkeypatch):
     assert not (out / LOCK_NAME).exists()
 
 
-def test_receipt_tmp_is_cleaned_when_its_replace_fails(tmp_path):
-    """守 `_write_receipt` 自己的 finally。
+def test_receipt_tmp_is_cleaned_when_its_replace_fails(tmp_path, monkeypatch):
+    """守 `_write_receipt` 自己的 finally——必须真的走到它的 os.replace。
 
-    上一条测试整体替换了 `_write_receipt`，于是回执 tmp 根本不会被创建——
-    它声称守着「回执 tmp 不残留」，其实守不住。这里让 replace 真的失败：
-    把 compile.json 做成一个目录，os.replace 必然抛。
+    第一版整体替换了 `_write_receipt`，回执 tmp 根本不会被创建；
+    第二版把 compile.json 做成目录，结果在**更早的**「作废旧回执」那步就抛了
+    ——两次都没碰到要守的那行。这一版：档案是新建（走 os.link，不受影响），
+    只让 os.replace 失败，于是唯一命中的就是回执那一步。
     """
+    import os
+
     out = _out_dir(tmp_path)
-    (out / RECEIPT_NAME).mkdir()
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("replace 失败")))
     with pytest.raises(OSError):
         publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
-    assert not (out / f".{RECEIPT_NAME}.tmp").exists()
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    assert (out / f".{RECEIPT_NAME}.tmp").exists() is False
     assert not (out / LOCK_NAME).exists()
+    # 配对正例：档案本身走的是 os.link，不该被这次故障牵连
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
 
 
 def test_tmp_write_failure_keeps_old_archive_and_its_receipt(tmp_path, monkeypatch):
@@ -642,3 +652,48 @@ def test_non_string_insight_id_fails_closed(bad_id):
     """list/dict 型 ID 会在 `in seen` 上抛不可哈希的 TypeError，绕过退出码 9。"""
     with pytest.raises(ArchiveContractError):
         check_structure(_payload(_insight("T1", insight_id=bad_id)))
+
+
+@pytest.mark.parametrize("titles", [[7], ["ok", None], "不是列表", [["嵌套"]]])
+def test_malformed_evidence_titles_fail_closed(titles):
+    """渲染时的空白折叠会在非字符串上抛 AttributeError，绕过退出码 9。
+
+    不做类型强转：把 7 悄悄渲染成 "7" 是替上游猜它想说什么。
+    """
+    item = _insight("T1")
+    item["payload"]["evidence_titles"] = titles
+    with pytest.raises(ArchiveContractError):
+        check_structure(_payload(item))
+
+
+def test_wellformed_evidence_titles_pass():
+    """配对正例。另含空列表与缺键两种合法形态。"""
+    ok = _insight("T1")
+    empty = _insight("T2")
+    empty["payload"]["evidence_titles"] = []
+    missing = _insight("T3")
+    del missing["payload"]["evidence_titles"]
+    check_structure(_payload(ok, empty, missing))
+
+
+def test_refusal_diagnosis_distinguishes_our_own_interrupted_run(tmp_path):
+    """「没有回执」有两种成因，拒绝动作相同但诊断必须分开。
+
+    说成「可能是你自己的笔记」会让人不敢删自己的东西——而那份档案其实是
+    我们上一次中途失败留下的。
+    """
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    rendered = render_archive(payload, select_for_archive(payload, _all_checked(payload)))
+    publish(out, payload, rendered, ["T1"])
+    (out / RECEIPT_NAME).unlink()          # 模拟「写完档案之后失败了」
+
+    with pytest.raises(ArchiveOverwriteError) as ours:
+        publish(out, payload, rendered, ["T1"])
+    assert "中途失败" in str(ours.value)
+
+    # 负例配对：真·外来文件仍然走另一条诊断，而不是被当成我们自己的
+    (out / "knowledge" / "CLAUDE.md").write_text("我自己的笔记", encoding="utf-8")
+    with pytest.raises(ArchiveOverwriteError) as foreign:
+        publish(out, payload, "内容 B", ["T1"])
+    assert "可能是你自己的一篇笔记" in str(foreign.value)

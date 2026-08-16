@@ -79,6 +79,24 @@ def check_structure(payload: dict) -> None:
         seen.add(insight_id)
 
         _check_route(insight_id, item["claude_md"])
+        _check_evidence_titles(insight_id, item["payload"])
+
+
+def _check_evidence_titles(insight_id: str, payload) -> None:
+    """证据标题必须是字符串列表。
+
+    渲染时会对每个标题做空白折叠（`.split()`），元素若是数字就抛 AttributeError
+    ——绕过退出码 9，直接给用户一段 traceback。**不做类型强转**：把 7 悄悄
+    渲染成 "7" 是替上游猜它想说什么，而这里根本不知道那是标题还是别的什么。
+    """
+    if not isinstance(payload, dict):
+        raise ArchiveContractError(f"{insight_id} 的 payload 不是对象。")
+    titles = payload.get("evidence_titles")
+    if titles is None:
+        return
+    if not isinstance(titles, list) or any(not isinstance(t, str) for t in titles):
+        raise ArchiveContractError(
+            f"{insight_id} 的 evidence_titles 不是字符串列表：{titles!r}。")
 
 
 def _check_route(insight_id: str, claude_md) -> None:
@@ -285,6 +303,25 @@ def _authorize(target, out_dir, payload: dict) -> None:
 
     receipt = _read_receipt(out_dir)
     if receipt is None:
+        # 「没有回执」有两种成因，拒绝的动作相同，但**诊断必须分开**：
+        # 一种是这文件根本不是我们写的（很可能是用户自己的笔记），
+        # 另一种是上一次运行在「作废旧回执」与「写新回执」之间失败了。
+        # 后者说成「可能是你自己的笔记」是在冤枉用户，会让人不敢删自己的东西。
+        #
+        # ⚠️ 这里读那行出处标记**只为了把话说准**，不构成授权——
+        # 两条分支都照样拒绝。标记可以被复制，所以它能证明的只有
+        # 「这看起来像我们写的」，不能证明「这确实是我们写的」。
+        marker = identity_marker(payload)
+        try:
+            looks_like_ours = marker in target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            looks_like_ours = False
+        if looks_like_ours:
+            raise ArchiveOverwriteError(
+                f"{target} 带着本次运行的标记，但 {out_dir / RECEIPT_NAME} 不在了"
+                f"——多半是上一次 compile 写完档案之后中途失败了。"
+                f"确认这份档案的内容之后删掉它再重跑即可；"
+                f"这里不替你决定，因为标记是可以被复制的，我无法确定它真是我写的。")
         raise ArchiveOverwriteError(
             f"{target} 已经存在，但 {out_dir / RECEIPT_NAME} 里没有本工具写过它的"
             f"记录——它可能是你自己的一篇笔记。拒绝覆盖。确认不要之后删掉它再重跑。")
