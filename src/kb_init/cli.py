@@ -326,7 +326,12 @@ def main(argv: list[str] | None = None) -> int:
         return subcommands[argv[0]](argv[1])
     if (len(argv) == 2 and argv[0] in subcommands
             and not argv[1].startswith("-")          # `compile --help` 不是路径
-            and not Path(argv[1]).exists() and not Path(argv[0]).exists()):
+            and not Path(argv[1]).exists()):
+        # 形状与上面那条分支保持一致：两个参数、第二个像路径时，argv[0] 就是子命令。
+        # 早先这里还多一个 `not Path(argv[0]).exists()`，于是当前目录里碰巧有个
+        # 叫 compile 的东西时，这条分流会被跳过、落回「用法错误」并漏掉旧分享版
+        # 提醒。那个条件是给**单参数**场景防「劫持一个真叫 compile 的目录」用的，
+        # 在这里既拦不住什么，又制造了一个依赖 CWD 内容的行为差异。
         # 路径打错时报「用法错误」是在指错方向：用法明明是对的，错的是那个文件
         # 不在。用户会去检查命令怎么写，而不是去看路径——**报错码指错方向，
         # 人就会做错事**，这与 7 / 9 分开的理由是同一条。

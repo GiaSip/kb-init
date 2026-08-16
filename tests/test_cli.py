@@ -713,3 +713,18 @@ def test_subcommand_with_a_flag_is_not_treated_as_a_missing_path(tmp_path, flag,
 
     assert main(["compile", flag]) == 2
     assert "找不到" not in capsys.readouterr().err
+
+
+def test_missing_path_diagnosis_does_not_depend_on_cwd(tmp_path, monkeypatch,
+                                                        capsys):
+    """当前目录里碰巧有个叫 compile 的东西时，诊断不该变。
+
+    依赖 CWD 内容的行为差异是最难查的一类 bug：同一条命令在两个目录里给出
+    两种回答，而用户不会想到去看当前目录里有什么。
+    """
+    from kb_init.cli import main
+
+    (tmp_path / "compile").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert main(["compile", "没有这个文件.md"]) == 7
+    assert "找不到" in capsys.readouterr().err
