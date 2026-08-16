@@ -306,7 +306,7 @@ TOCTOU 与并发（Codex 审 #1）：
 
 | 模块 | 职责 | 依赖 | 不认识 |
 |---|---|---|---|
-| `claude_md.py` | `SECTIONS` 表 + 结构 gate + 档案渲染（纯函数）+ 覆盖授权与写盘 | 无 | 索引、聚类、CLI |
+| `claude_md.py` | `SECTIONS` 表 + 结构 gate + 档案渲染（纯函数）+ 覆盖授权与写盘 | `insights.render`（只为校验 `canonical_text`） | 索引、聚类、CLI |
 | `cli.py`（改） | `compile` 子命令：编排 §5 的 gate 序列、映射退出码 | `insights_md` / `insights` / `claude_md` | 渲染细节 |
 | `insights.py`（改） | R1 的 `claude_md` 字段（§8） | — | — |
 

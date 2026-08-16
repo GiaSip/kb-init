@@ -482,3 +482,22 @@ def test_length_profile_median_is_correct_for_even_samples():
     got = {i.kind: i for i in
            build_corpus_insights(_manifest(), _residual_only_index(), bodies)}
     assert got["length_profile"].payload["median_chars"] == 150
+
+
+def test_r1_routes_to_coverage_section():
+    """碎片区洞察进档案线：档案只讲了 kept 的一小部分，不说这条，
+    agent 会把它当成全集（2D spec §2.3）。"""
+    index = _corpus_index(1, per_group=5, n_residual=15)
+    bodies, titles = _bodies_titles(index)
+    got = {i.kind: i for i in build_residual_insights(index, bodies, titles, 20)}
+    assert got["fragment_zone"].claude_md == {"section": "coverage"}
+
+
+def test_r2_stays_out_of_archive():
+    """负例：防止「把 residual 整族路由过去」的实现蒙混过关。
+    「篇幅最大的 3 篇」是给人看的线索，对 agent 的自我认知没有用。"""
+    index = _corpus_index(1, per_group=5, n_residual=15)
+    bodies, titles = _bodies_titles(index)
+    got = {i.kind: i for i in build_residual_insights(index, bodies, titles, 20)}
+    assert "long_orphans" in got, "空的话下面这条断言恒真"
+    assert got["long_orphans"].claude_md is None
