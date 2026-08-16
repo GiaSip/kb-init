@@ -66,6 +66,11 @@ def check_structure(payload: dict) -> None:
                 f"第 {n} 条洞察缺少字段：{'、'.join(missing)}。")
 
         insight_id = item["insight_id"]
+        if not isinstance(insight_id, str) or not insight_id:
+            # 不先验类型的话，list / dict 型 ID 会在下一行的 `in seen` 上抛
+            # 不可哈希的 TypeError——绕过退出码 9，直接给用户一段 traceback。
+            raise ArchiveContractError(
+                f"第 {n} 条洞察的 insight_id 不是非空字符串：{insight_id!r}。")
         if insight_id in seen:
             # 一个勾选框授权两段正文进档案：用户审的是一条，进去的是两条。
             raise ArchiveContractError(
@@ -353,15 +358,20 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
         os.close(fd)
         _authorize(target, out_dir, payload)
         data = text.encode("utf-8")
-        # 先作废旧回执，再动档案。**不变量：回执存在 ⇒ 它描述的就是盘上那份档案。**
-        # 反过来做的话，「档案换成新的、回执写失败」会留下一份描述着旧哈希的
-        # 回执——它会（错误地）指控用户手改过档案，而其实是我们自己换的。
-        # 一份描述着不存在内容的回执就是在撒谎，宁可没有。
-        (out_dir / RECEIPT_NAME).unlink(missing_ok=True)
         try:
-            # 写 tmp 也放进这个 try：写到一半失败（磁盘满、被打断）同样会
+            # 写 tmp 放进这个 try：写到一半失败（磁盘满、被打断）同样会
             # 留下半份 .tmp，而残骸会让下一个人误判发生过什么。
+            #
+            # ⚠️ 顺序：**tmp 先写满，再作废回执，最后一步换文件。**
+            # 上一版把「作废回执」放在写 tmp 之前，于是磁盘满这种常见故障会留下
+            # {旧档案完好, 回执没了} —— 下次 compile 会以「没有回执」拒绝覆盖，
+            # 并要求用户删掉一份**完好的、我们自己写的**档案。修一个撒谎的回执，
+            # 修出了一个冤枉用户的诊断。
             _write_exclusive(tmp, data)
+            # 作废旧回执。**不变量：回执存在 ⇒ 它描述的就是盘上那份档案。**
+            # 不作废的话，「档案换成新的、回执写失败」会留下一份记着旧哈希的
+            # 回执——它会（错误地）指控用户手改过档案，而其实是我们换的。
+            (out_dir / RECEIPT_NAME).unlink(missing_ok=True)
             if target.exists():
                 os.replace(tmp, target)
             else:

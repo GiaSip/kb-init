@@ -439,20 +439,29 @@ def test_archive_contains_nothing_beyond_the_contract():
     grouped = select_for_archive(payload, _all_checked(payload))
     # 注释行也要逐条列白名单。原先这条测试放过了所有 `<!--` 开头的行——
     # 于是一个把总结偷偷写进 HTML 注释的实现照样全绿。
-    allowed = {ARCHIVE_TITLE, identity_marker(payload), GENERATED_NOTE}
-    allowed |= {f"## {h}" for _, h, _ in SECTIONS}
-    allowed |= {f"> {lead}" for _, _, lead in SECTIONS if lead}
+    # 用 list 不用 set：两条洞察的证据标题**可以合法地相同**（这个 fixture 里
+    # 就是），集合会把它们并成一条，于是「多输出一遍」反而看不出来。
+    allowed = [ARCHIVE_TITLE, identity_marker(payload), GENERATED_NOTE]
+    allowed += [f"## {h}" for sid, h, _ in SECTIONS
+                if sid in {s for s, _ in grouped}]
+    allowed += [f"> {lead}" for sid, _, lead in SECTIONS
+                if lead and sid in {s for s, _ in grouped}]
     for _, items in grouped:
         for item in items:
-            allowed.add(f"- {item['canonical_text']}")
+            allowed.append(f"- {item['canonical_text']}")
             titles = item["payload"].get("evidence_titles") or []
             if titles:
-                allowed.add("  证据：" + " · ".join(
+                allowed.append("  证据：" + " · ".join(
                     " ".join(t.split()) for t in titles))
 
-    unexplained = [ln for ln in render_archive(payload, grouped).splitlines()
-                   if ln.strip() and ln not in allowed]
-    assert unexplained == [], f"产物里有追溯不到来源的内容：{unexplained}"
+    # 用**计数**而不是集合：集合只查「这行属不属于白名单」，一个把某行重复
+    # 输出两遍的实现照样全绿——那也是多写了内容。
+    from collections import Counter
+
+    got = Counter(ln for ln in render_archive(payload, grouped).splitlines()
+                  if ln.strip())
+    assert got == Counter(allowed), (
+        f"多出来的：{got - Counter(allowed)}；少掉的：{Counter(allowed) - got}")
 
 
 # ---------------- 失败路径的残骸 ----------------
@@ -586,3 +595,50 @@ def test_write_failure_midway_leaves_no_tmp(tmp_path, monkeypatch):
         publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
     assert _tmp_leftovers(out) == []
     assert not (out / LOCK_NAME).exists()
+
+
+def test_receipt_tmp_is_cleaned_when_its_replace_fails(tmp_path):
+    """守 `_write_receipt` 自己的 finally。
+
+    上一条测试整体替换了 `_write_receipt`，于是回执 tmp 根本不会被创建——
+    它声称守着「回执 tmp 不残留」，其实守不住。这里让 replace 真的失败：
+    把 compile.json 做成一个目录，os.replace 必然抛。
+    """
+    out = _out_dir(tmp_path)
+    (out / RECEIPT_NAME).mkdir()
+    with pytest.raises(OSError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert not (out / f".{RECEIPT_NAME}.tmp").exists()
+    assert not (out / LOCK_NAME).exists()
+
+
+def test_tmp_write_failure_keeps_old_archive_and_its_receipt(tmp_path, monkeypatch):
+    """R3-1 的守卫：写 tmp 失败时，旧档案**和它的回执**都必须还在。
+
+    只保住档案不够——回执没了的话，下次 compile 会以「没有回执」拒绝覆盖，
+    并要求用户删掉一份完好的、我们自己写的档案。
+    """
+    import kb_init.claude_md as mod
+
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    publish(out, payload, "内容 A", ["T1"])
+    before = (out / RECEIPT_NAME).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_write_exclusive",
+                        lambda p, d: (_ for _ in ()).throw(OSError("磁盘满了")))
+    with pytest.raises(OSError):
+        publish(out, payload, "内容 B", ["T1"])
+
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
+    assert (out / RECEIPT_NAME).read_text(encoding="utf-8") == before
+    # 而且下一次正常重跑必须还能覆盖——不能要求用户先删文件
+    monkeypatch.undo()
+    assert publish(out, payload, "内容 C", ["T1"]).read_text(encoding="utf-8") == "内容 C"
+
+
+@pytest.mark.parametrize("bad_id", [["T1"], {"a": 1}, 7, "", None])
+def test_non_string_insight_id_fails_closed(bad_id):
+    """list/dict 型 ID 会在 `in seen` 上抛不可哈希的 TypeError，绕过退出码 9。"""
+    with pytest.raises(ArchiveContractError):
+        check_structure(_payload(_insight("T1", insight_id=bad_id)))
