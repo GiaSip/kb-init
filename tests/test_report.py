@@ -10,6 +10,8 @@ from kb_init.report import (
     bar_width,
     esc,
     render_private,
+    render_share,
+    share_keywords,
 )
 
 
@@ -221,3 +223,96 @@ def test_topic_bars_scale_to_the_largest_topic():
             re.findall(r'style="width: ([\d.]+)%"', render_private(payload))]
     assert bars[0] == 100.0, "最大的主题应当满格"
     assert bars[1] == pytest.approx(100.0 * 5 / 29, abs=0.05)
+
+
+# ---------------- 分享版与 allowlist ----------------
+
+def _all_checked(payload):
+    return {i["insight_id"]: True for i in payload["insights"]}
+
+
+def _share(payload, selections=None):
+    return render_share(payload, selections or _all_checked(payload))
+
+
+@pytest.mark.parametrize("needle", [
+    "标题一",                 # evidence_titles
+    "RUNID-9f3a",             # run_id
+    "CORPUSHASH-7b21",        # corpus_hash
+    "ctfidf_multiscript",     # naming.params
+])
+def test_share_omits_every_denied_field(needle):
+    """⚠️ 探针值刻意取得可辨识：早先用 run_id="r1" / corpus_hash="c1"，
+    而 "c1" 与洞察 ID `C1` 撞了，这条断言于是在测一件与它声称无关的事。"""
+    payload = _payload(_insight("T1"), _corpus("C1"),
+                       run_id="RUNID-9f3a", corpus_hash="CORPUSHASH-7b21",
+                       naming={"method": "ctfidf_multiscript", "params": {}},
+                       limits={"topic_insight_cap": 12})
+    assert needle not in _share(payload)
+
+
+def test_share_omits_evidence_doc_ids():
+    item = _insight("T1")
+    item["payload"]["evidence_doc_ids"] = ["notion-export-私密文件名"]
+    assert "私密文件名" not in _share(_payload(item))
+
+
+def test_share_keeps_allowed_fields():
+    """配对正例：把整份内容删光也能让上面那组负例全绿。"""
+    out = _share(_payload(_insight("T1"), _corpus("C1")))
+    assert "排版" in out and "typography" in out      # keywords
+    assert "T1" in out                                 # 短 ID
+    assert "T1 的断言句" in out                        # canonical_text
+
+
+def test_share_only_contains_checked_items():
+    payload = _payload(_insight("T1"),
+                       _insight("T2", payload={"keywords": ["秘密关键词"],
+                                               "doc_count": 3}))
+    out = render_share(payload, {"T1": True, "T2": False})
+    assert "T2" not in out
+    assert "秘密关键词" not in out, "取消勾选的条目，它的关键词也不该出现"
+
+
+def test_share_disclosure_present():
+    out = _share(_payload(_insight("T1")))
+    assert "不包含" in out and "标题" in out
+
+
+def test_share_is_built_from_scratch_not_filtered():
+    """守住「从零构造」而不是「拿私有版删几处」。
+
+    payload 里多一个未列入 allowlist 的字段，它绝不能自动出现在分享版里——
+    否则上游每加一个字段，分享版就默默多泄露一样东西，而没有任何症状。
+    """
+    item = _insight("T1")
+    item["payload"]["future_field"] = "上游以后新加的东西"
+    item["source_path"] = "/somewhere/私密路径.md"
+    out = _share(_payload(item))
+    assert "上游以后新加的东西" not in out
+    assert "私密路径" not in out
+
+
+def test_share_keywords_lists_exactly_what_appears():
+    payload = _payload(_insight("T1"),
+                       _insight("T2", payload={"keywords": ["甲", "乙"],
+                                               "doc_count": 3}))
+    selections = {"T1": True, "T2": False}
+    listed = share_keywords(payload, selections)
+    assert listed == ["排版", "typography"]
+    out = render_share(payload, selections)
+    for kw in listed:
+        assert kw in out
+    assert "甲" not in out
+
+
+def test_share_has_no_reference_constructs_either():
+    out = _share(_payload(_insight("T1"), _corpus("C1")))
+    for construct in ("src=", "href=", "<script", "@import", "url(", "<form"):
+        assert construct not in out, construct
+
+
+def test_share_escapes_too():
+    item = _insight("T1")
+    item["payload"]["keywords"] = ["<script>alert(1)</script>"]
+    assert "<script>alert" not in _share(_payload(item))

@@ -213,3 +213,90 @@ def render_private(payload: dict) -> str:
               "</div>",
               "</body>", "</html>"]
     return "\n".join(lines) + "\n"
+
+
+# 分享版的字段 allowlist：**从零放行**，不是「拿私有版删几处」。
+# blocklist 永远补不完，allowlist 一次收敛——DESIGN §7 已就脱敏裁过这一条。
+# 上游以后新加的字段默认**不出现**在分享版里，这正是想要的行为：
+# 否则每加一个字段就默默多泄露一样东西，而且没有任何症状。
+SHARE_ALLOWED_PAYLOAD_KEYS = frozenset({
+    "keywords",          # 报告的全部内容价值所在
+    "doc_count", "count", "share_of_kept",
+    "total", "kept", "dropped_stub", "dropped_duplicate",
+    "dated_docs", "total_docs", "coverage", "threshold",
+    "median_chars", "shortest_chars", "longest_chars",
+    "residual_count", "by_kind",
+})
+
+# ⚠️ 字段级 allowlist **挡不住值级泄露**：关键词本身就来自正文，实测语料里
+# 出现过账号 handle 被抽成关键词。所以分享版还有两道产品级的兜底——
+# 只收用户勾选过的条目，以及 CLI 把它包含的全部关键词打印出来让人过目。
+# 这里如实写明，不假装解决。
+SHARE_DISCLOSURE = (
+    "这份分享版包含：主题关键词、统计数字，以及你逐条确认过的那些说明。"
+    "不包含：任何笔记标题、正文片段、文件路径、运行编号。"
+    "关键词由你的笔记正文统计得出——发出去之前请自己看一遍它们。"
+)
+
+
+def _share_payload(item: dict) -> dict:
+    return {k: v for k, v in (item.get("payload") or {}).items()
+            if k in SHARE_ALLOWED_PAYLOAD_KEYS}
+
+
+def _share_items(payload: dict, selections: dict[str, bool]) -> list[dict]:
+    """从零构造每一条：只抄 allowlist 里的字段，其余一律不带过来。
+
+    **只收勾选过的条目。** 分享版是要发出去的，而主 run 产出报告时用户还没审过
+    任何东西——所以分享版只能在 compile 时生成，且只含他确认过的部分。
+    """
+    out = []
+    for item in payload.get("insights") or []:
+        if selections.get(item.get("insight_id")) is not True:
+            continue
+        out.append({
+            "insight_id": item["insight_id"],
+            "family": item.get("family", ""),
+            "kind": item.get("kind", ""),
+            "canonical_text": item["canonical_text"],
+            "payload": _share_payload(item),
+        })
+    return out
+
+
+def share_keywords(payload: dict, selections: dict[str, bool]) -> list[str]:
+    """分享版里会出现的全部关键词，按出现顺序去重。
+
+    给 CLI 打印用：字段级 allowlist 拦不住值级泄露，能拦住的只有人的眼睛，
+    而人得先看得到它们。
+    """
+    seen: list[str] = []
+    for item in _share_items(payload, selections):
+        for kw in item["payload"].get("keywords") or []:
+            text = str(kw)
+            if text not in seen:
+                seen.append(text)
+    return seen
+
+
+def render_share(payload: dict, selections: dict[str, bool]) -> str:
+    """可以发出去的那一版。
+
+    与 `render_private` 共用卡片渲染，但**喂给它的是重新构造过的条目**
+    （`_share_items`），不是原 payload——「拿全量版删几处」的写法，
+    会在上游新增字段时静默失守。
+    """
+    items = _share_items(payload, selections)
+    lines = _head("kb-init — 一份知识库报告")
+    lines.append("<h1>一份知识库报告</h1>")
+    for item in items:
+        if item["kind"] == "retention":
+            p = item["payload"]
+            if "total" in p and "kept" in p:
+                lines += [f'<p class="headline">{esc(f"{p["total"]} → {p["kept"]}")}</p>',
+                          f'<p class="sub">{esc("读入的篇数 → 留下的篇数")}</p>']
+            break
+    lines += _body(items, with_evidence=False)
+    lines += [f'<p class="disclosure">{esc(SHARE_DISCLOSURE)}</p>',
+              "</body>", "</html>"]
+    return "\n".join(lines) + "\n"
