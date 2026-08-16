@@ -642,3 +642,15 @@ def test_report_skipped_when_insights_failed(tmp_path):
 
     assert _run_report_stage(tmp_path, insights_status="failed") == (
         "skipped", "insights_failed")
+
+
+def test_report_reason_does_not_relabel_index_failure(tmp_path):
+    """索引失败被记成 no_index 就是产物在撒谎——看 manifest 排障的人会去查
+    一个根本没发生的事。"""
+    from kb_init.pipeline import _run_report_stage
+
+    assert _run_report_stage(tmp_path, insights_status="skipped",
+                             insights_reason="index_failed") == (
+        "skipped", "index_failed")
+    assert _run_report_stage(tmp_path, insights_status="skipped",
+                             insights_reason="no_index") == ("skipped", "no_index")

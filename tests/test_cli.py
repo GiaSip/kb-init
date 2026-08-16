@@ -639,3 +639,43 @@ def test_share_report_is_replaced_not_appended_on_rerun(tmp_path):
     text = share.read_text(encoding="utf-8")
     assert "独有关键词甲" in text
     assert "独有关键词乙" not in text, "取消勾选之后它不该还在分享版里"
+
+
+@pytest.mark.parametrize("break_it,expected", [
+    ("manifest", 7),
+    ("schema", 9),
+])
+def test_stale_share_warning_covers_other_failure_codes(tmp_path, capsys,
+                                                        break_it, expected):
+    """提醒必须覆盖**每一个**非 0 出口。只覆盖 8/1 等于漏了一半。"""
+    import json
+
+    from kb_init.cli import main
+
+    payload = _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert (tmp_path / "report.share.html").exists()
+
+    if break_it == "manifest":
+        (tmp_path / "manifest.json").write_text("{坏了", encoding="utf-8")
+    else:
+        payload["schema_version"] = "9.9"
+        (tmp_path / "insights.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    capsys.readouterr()
+    assert main(["compile", str(tmp_path / "insights.md")]) == expected
+    assert "上一次" in capsys.readouterr().err
+
+
+def test_share_write_failure_says_the_archive_is_fine(tmp_path, monkeypatch, capsys):
+    """笼统报「写入失败」会让人以为整件事都没成，去重跑一个已经完成的步骤。"""
+    import kb_init.cli as mod
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    monkeypatch.setattr(mod, "_write_share_report",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("盘满了")))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+    err = capsys.readouterr().err
+    assert "档案已写入" in err and "分享版" in err
+    assert (tmp_path / "knowledge" / "CLAUDE.md").exists()

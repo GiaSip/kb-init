@@ -148,6 +148,19 @@ def _warn_if_stale_share_report(out_dir: Path) -> None:
 
 
 def _compile_command(md_path: str) -> int:
+    """把 `_compile` 包起来，**在唯一的出口**统一提醒旧分享版。
+
+    早先只在退出码 8 / 1 两处提醒，而 4 / 7 / 9 同样会留下上一次的分享版——
+    提醒漏了一半等于没提醒：用户偏偏会在报错那次以为「这次没生成，那份还是旧的吧」，
+    也偏偏可能不这么想。放在唯一出口才不会漏。
+    """
+    code = _compile(md_path)
+    if code != 0:
+        _warn_if_stale_share_report(Path(md_path).parent)
+    return code
+
+
+def _compile(md_path: str) -> int:
     """`kb-init compile <insights.md>`：把勾选过的洞察编译成知识库的 CLAUDE.md。
 
     gate 顺序不是随便排的（2D spec §5）：**版本与身份 gate 必须早于
@@ -257,7 +270,15 @@ def _compile_command(md_path: str) -> int:
         # 分享版落 out_dir 根目录，那里 100% 是工具自有产物（语料只进 knowledge/，
         # 且 out_dir 非空时主 run 直接拒绝运行）——碰撞面不存在，所以不给它套
         # 档案那套覆盖授权。为一个不存在的风险加机制，本身就是一种谎。
-        share_path = _write_share_report(md.parent, share_html)
+        try:
+            share_path = _write_share_report(md.parent, share_html)
+        except OSError as exc:
+            # 档案已经写成了。笼统报一句「写入失败」会让人以为整件事都没成，
+            # 于是去重跑一个其实已经完成的步骤，或者干脆以为档案也没写。
+            print(f"错误：档案已写入 {archive}，但分享版没写成（{exc}）。"
+                  f"档案可以照常用；再跑一次 compile 就能把分享版补上。",
+                  file=sys.stderr)
+            return 4
     except ReportContractError as exc:
         # 报告渲染不出来 = insights.json 里的值渲染不了，与 canonical_text 对不上
         # 是同一类问题，同样归 9。
@@ -266,14 +287,12 @@ def _compile_command(md_path: str) -> int:
     except ArchiveEmptyError as exc:
         # 8 而不是 0：什么都没写却返回成功，脚本会以为档案在那儿。
         print(f"错误：{exc}", file=sys.stderr)
-        _warn_if_stale_share_report(md.parent)
         return 8
     except ArchiveContractError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 9
     except ArchiveOverwriteError as exc:
         print(f"错误：{exc}", file=sys.stderr)
-        _warn_if_stale_share_report(md.parent)
         return 1
     except OSError as exc:
         print(f"错误：写入失败——{exc}", file=sys.stderr)

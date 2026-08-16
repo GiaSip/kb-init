@@ -183,7 +183,9 @@ def _run_insights_stage(
 REPORT_NAME = "report.private.html"
 
 
-def _run_report_stage(staging: Path, *, insights_status: str) -> tuple[str, str | None]:
+def _run_report_stage(
+    staging: Path, *, insights_status: str, insights_reason: str | None = None
+) -> tuple[str, str | None]:
     """报告阶段。形状与纪律**照抄** `_run_insights_stage`：
 
     **异常绝不允许放出去。** 放出去会穿到 `run()` 的 `finally`，把清洗产物、索引、
@@ -194,7 +196,10 @@ def _run_report_stage(staging: Path, *, insights_status: str) -> tuple[str, str 
     tmp/replace 逻辑：「整次运行原子」这条已有的机制直接覆盖它。
     """
     if insights_status == "skipped":
-        return "skipped", "no_index"
+        # 原样转述上游给的理由，不自己改写成 "no_index"：洞察被跳过有两种成因
+        # （`--no-index` 与「索引失败」），把后者记成前者就是产物在撒谎——
+        # 而看 manifest 排障的人会据此去查一个根本没发生的事。
+        return "skipped", insights_reason or "no_index"
     if insights_status != "complete":
         return "skipped", "insights_failed"
 
@@ -556,7 +561,8 @@ def run(
         )
 
         report_status, report_reason = _run_report_stage(
-            staging, insights_status=insights_status)
+            staging, insights_status=insights_status,
+            insights_reason=insights_reason)
 
         write_manifest(
             docs,
