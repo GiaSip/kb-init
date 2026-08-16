@@ -51,6 +51,18 @@ def check_structure(payload: dict) -> None:
     管道会走到「没有可归档条目」而报出 8，把原因说成用户没勾选。
     这是「留一条兜底路径，规则就被它绕过」的第七种形态。
     """
+    # 顶层与元字段也在这里验，而不是指望调用方先验过。CLI 确实先验了，
+    # 但「模块自己不检查，靠上游帮它检查」正是「两个入口两套标准」的温床——
+    # 下一个调用方（2C / 2E）不会知道它欠着这笔债。
+    if not isinstance(payload, dict):
+        raise ArchiveContractError("insights.json 的顶层不是对象。")
+    for field in ("run_id", "corpus_hash", "schema_version"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value:
+            raise ArchiveContractError(
+                f"insights.json 缺少可用的 {field}（{value!r}）——"
+                f"没有它就无法确认这份档案出自哪一次运行。")
+
     insights = payload.get("insights")
     if not isinstance(insights, list):
         raise ArchiveContractError(

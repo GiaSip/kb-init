@@ -71,15 +71,20 @@ def test_sections_table_is_ordered_and_consistent_with_known_set():
     assert KNOWN_SECTIONS == {s[0] for s in SECTIONS}
 
 
-def test_leads_state_only_pipeline_facts():
-    """静态常量也会撒谎：导语一旦陈述「这份语料的」事实，换份语料即成假话。
-    所以导语里不许出现任何与语料有关的词（Codex 审 #7）。"""
-    forbidden = ("这份语料", "时间", "稳定性", "篇数太少", "日期")
+def test_leads_avoid_the_known_corpus_claim_vocabulary():
+    """**这是一条绊线，不是证明。**
+
+    真正要守的规则是「导语只能陈述对任何语料都成立的管道事实」，而一句话是不是
+    在陈述语料事实，机器判不了——`共收录 29 篇` 这种写法照样能溜过任何词表。
+    这条测试只拦已经犯过的那一类（把「这份语料日期太少」写死成常量），
+    真正的 gate 是改 SECTIONS 时有人读一遍。测试名如实说明它守的是词表。
+    """
+    forbidden = ("这份语料", "时间", "稳定性", "日期")
     for _, _, lead in SECTIONS:
         if lead is None:
             continue
-        assert not any(w in lead for w in forbidden[1:]), lead
-        assert forbidden[0] not in lead, lead
+        assert not any(w in lead for w in forbidden), lead
+        assert not any(ch.isdigit() for ch in lead), f"导语里出现了数字：{lead}"
 
 
 # ---------------- 结构 gate ----------------
@@ -270,14 +275,17 @@ def test_missing_evidence_titles_key_is_fine():
     assert "证据" not in _render_all(_payload(item))
 
 
-def test_lead_is_static_and_corpus_independent():
-    """同一节的导语在两份差异很大的语料上必须逐字相同（Codex 审 #7）。"""
-    a = _payload(_insight("T1"), run_id="ra", corpus_hash="ca")
-    b = _payload(_insight("T1", canonical_text="完全不同的一句"),
-                 run_id="rb", corpus_hash="cb")
-    lead = [ln for ln in _render_all(a).splitlines() if ln.startswith(">")]
-    assert lead and lead == [ln for ln in _render_all(b).splitlines()
-                             if ln.startswith(">")]
+def test_renderer_does_not_interpolate_into_leads():
+    """导语行必须**逐字**等于 SECTIONS 里那个常量。
+
+    原先这条写的是「两份不同语料渲染出的导语相同」——那是恒真的：导语本来就
+    取自模块常量，无论渲染器怎么写都相同。它守不住任何东西。
+    改成对照常量本身，才拦得住一个偷偷做插值的渲染器
+    （`f"> {lead}（共 {n} 条）"` 之类）。
+    """
+    payload = _payload(_insight("T1"), _insight("R1", section="coverage"))
+    rendered = [ln for ln in _render_all(payload).splitlines() if ln.startswith(">")]
+    assert rendered == [f"> {lead}" for _, _, lead in SECTIONS if lead]
 
 
 def test_header_carries_identity():
@@ -292,8 +300,11 @@ def test_headings_come_from_sections_table():
     assert out.index("## 关注领域") < out.index("## 这份档案的覆盖范围")
 
 
-def test_archive_ends_with_single_newline():
-    assert _render_all(_payload(_insight("T1"))).endswith("\n")
+def test_archive_ends_with_exactly_one_newline():
+    """`endswith("\\n")` 对 `"…\\n\\n\\n"` 也成立——那条断言拦不住尾部空行堆积，
+    而「一行都不能多」那条合同测试又刚好把空行滤掉了，两边都漏。"""
+    out = _render_all(_payload(_insight("T1")))
+    assert out.endswith("\n") and not out.endswith("\n\n")
 
 
 # ---------------- 覆盖授权与写盘 ----------------
@@ -697,3 +708,22 @@ def test_refusal_diagnosis_distinguishes_our_own_interrupted_run(tmp_path):
     with pytest.raises(ArchiveOverwriteError) as foreign:
         publish(out, payload, "内容 B", ["T1"])
     assert "可能是你自己的一篇笔记" in str(foreign.value)
+
+
+@pytest.mark.parametrize("payload", [
+    [],
+    None,
+    "字符串",
+    {"insights": []},                                    # 缺全部元字段
+    {"run_id": "r1", "corpus_hash": "c1", "insights": []},   # 缺 schema_version
+    {"run_id": "", "corpus_hash": "c1", "schema_version": "0.1", "insights": []},
+    {"run_id": 1, "corpus_hash": "c1", "schema_version": "0.1", "insights": []},
+])
+def test_malformed_root_payload_fails_closed(payload):
+    """顶层与元字段也归结构 gate 管。
+
+    模块自己不检查、指望调用方先检查过，正是「两个入口两套标准」的温床——
+    下一个调用方（2C / 2E）不会知道它欠着这笔债。
+    """
+    with pytest.raises(ArchiveContractError):
+        check_structure(payload)
