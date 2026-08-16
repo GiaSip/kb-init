@@ -1,6 +1,6 @@
 # 2D `compile` → CLAUDE.md — 设计 spec
 
-> 状态：设计已定，待 Codex 架构审 → 实现
+> 状态：**已实现并合并 main**（2026-08-16）。Codex 七轮审 22 条阻断全部处理，末轮零阻断。
 > 上游：2B spec §5（`insights.json` 合同）/ §6（`insights.md` 合同）/ §7（`revisit_gate`）
 > 相关：DESIGN §4.2（Wrapped 是档案的验收界面）/ §4.3（IR 合同）/ §6（CLAUDE.md 产出什么）
 
