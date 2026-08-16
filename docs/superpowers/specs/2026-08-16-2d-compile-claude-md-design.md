@@ -150,11 +150,13 @@ SECTIONS = (
 
 ```
 kb-init compile <out_dir>/insights.md
-  1. 定位同目录的 insights.json / manifest.json；knowledge/ 必须已存在且是目录  → 否则 4
-  2. manifest gate：insights_status == "complete"                            → 否则 7
+  1. knowledge/ 必须已存在、是目录、且不是符号链接（**第一个 gate**）        → 否则 4
+  2. 定位同目录的 insights.json / manifest.json；manifest gate：
+     insights_status == "complete"                                          → 否则 7
   3. 读 insights.json（读不动 / 顶层不是对象 / 缺必需键）                       → 否则 9
   4. 版本 gate：payload.schema_version == 本版 insights.SCHEMA_VERSION        → 否则 9
-  5. 身份 gate：manifest.run_id / corpus_hash 与 payload 的两项一致            → 否则 9
+  5. 身份 gate：payload 的 run_id / corpus_hash 是非空字符串，且与 manifest 一致 → 否则 9
+     （只比相等不够：两边同时缺失时 None == None 会放行，那是拿缺失当共识）
   6. 结构 gate（**全量，与勾选状态无关**，见 §5.1）                            → 否则 9
   7. validate_markdown(md, payload)                                          → 不合法则 7
   8. parse_markdown(md) → selections
@@ -232,12 +234,19 @@ TOCTOU 与并发（Codex 审 #1）：
 
 ### 5.3 写盘失败与「不带走已完成的产物」
 
-顺序：**先原子替换档案，再写回执**。两个文件做不到共同原子，所以把失败留在信息量最小的地方：
+顺序：**先作废旧回执 → 再原子替换档案 → 最后写新回执**。两个文件做不到共同原子，
+所以选一条能守住的不变量：**回执存在 ⇒ 它描述的就是盘上那份档案。**
 
-- 档案写失败 → 旧档案原样保留，退出码 4，什么都没变；
-- 档案写成功、回执写失败 → **档案保留**（硬不变量 #2：失败不许带走已完成的产物），
-  退出码 4，诊断明说「档案已写入但回执没落盘，下次 compile 会拒绝覆盖它——
-  删掉 `knowledge/CLAUDE.md` 再重跑」。这是 fail closed 的一个诚实代价，不给它开后门。
+- 档案写失败 → 旧档案原样保留，退出码 4；
+- 档案写成功、回执写失败 → **档案保留**（硬不变量 #2），无回执，退出码 4，
+  诊断明说「档案已写入但回执没落盘，下次 compile 会拒绝覆盖它——
+  删掉 `knowledge/CLAUDE.md` 再重跑」。
+
+> ⚠️ 初稿是「先档案后回执」且不作废旧回执，Codex 二审 B3 指出重编译时的后果：
+> 档案换成了新的、回执还记着旧哈希——下一次 compile 会比对哈希后**指控用户
+> 手改过档案**，而其实是我们自己换的。一份描述着不存在内容的回执就是在撒谎
+> （硬不变量 #4），宁可没有。代价是「档案写失败」时连旧回执也没了，
+> 下次会以「没有回执」拒绝覆盖——诚实且 fail closed，可接受。
 
 **`knowledge/` 不存在时不创建，直接退出码 4**——这一条与 Codex 审 #6 的建议相反，
 理由记在这里：能走到 compile，说明 `insights_status == "complete"`，也就说明流水线

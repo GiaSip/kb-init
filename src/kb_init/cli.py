@@ -134,17 +134,20 @@ def _compile_command(md_path: str) -> int:
 
     md = Path(md_path)
     try:
-        bundle = _locate_bundle(md)
-    except _BundleError as exc:
-        print(f"错误：{exc}", file=sys.stderr)
-        return 7
-    try:
-        # 早于所有洞察 gate：目录被删掉时若拖到最后才发现，用户会先看到
-        # 「你一条都没勾」（8）或「json 对不上」（9），诊断指向完全错误的方向。
+        # **第一个** gate，早于 manifest：目录被删掉时若拖到后面才发现，
+        # 用户会先看到「manifest 对不上」（7）、「你一条都没勾」（8）或
+        # 「json 对不上」（9）——诊断指向完全错误的方向。
+        # 「这个目录根本不是一个 kb-init 输出目录」是最结构性的那个事实，
+        # 它该先说。
         check_archive_dir(md.parent)
     except OSError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 4
+    try:
+        bundle = _locate_bundle(md)
+    except _BundleError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 7
 
     manifest = bundle["manifest"]
     try:
@@ -163,10 +166,19 @@ def _compile_command(md_path: str) -> int:
                 f"本版 kb-init 认的是 {SCHEMA_VERSION!r}——"
                 f"两者不是同一版格式，请用当前版本重跑一次。")
         for field in ("run_id", "corpus_hash"):
-            if manifest.get(field) != payload.get(field):
+            got = payload.get(field)
+            # 只比相等是不够的：两边**同时缺失**时 None == None 会放行，
+            # 而后面 identity_marker 取 payload["run_id"] 会裸抛 KeyError
+            # ——用户拿到的是一段 traceback，不是诊断。
+            # 「两边都没有」不等于「两边一致」，那是拿缺失当共识。
+            if not isinstance(got, str) or not got:
+                raise ArchiveContractError(
+                    f"insights.json 里没有可用的 {field}（{got!r}）——"
+                    f"这份文件缺少身份，无法确认它属于哪一次运行。")
+            if manifest.get(field) != got:
                 raise ArchiveContractError(
                     f"manifest 的 {field} 是 {manifest.get(field)!r}，"
-                    f"insights.json 是 {payload.get(field)!r}——"
+                    f"insights.json 是 {got!r}——"
                     f"这两份文件不是同一次运行的产物。")
         check_structure(payload)
     except ArchiveContractError as exc:

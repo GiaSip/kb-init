@@ -12,6 +12,7 @@ from kb_init.claude_md import (
     ArchiveEmptyError,
     ARCHIVE_NAME,
     ARCHIVE_TITLE,
+    GENERATED_NOTE,
     ArchiveOverwriteError,
     LOCK_NAME,
     RECEIPT_NAME,
@@ -436,7 +437,9 @@ def test_archive_contains_nothing_beyond_the_contract():
     """
     payload = _payload(_insight("T1"), _insight("R1", section="coverage"))
     grouped = select_for_archive(payload, _all_checked(payload))
-    allowed = {ARCHIVE_TITLE, identity_marker(payload)}
+    # 注释行也要逐条列白名单。原先这条测试放过了所有 `<!--` 开头的行——
+    # 于是一个把总结偷偷写进 HTML 注释的实现照样全绿。
+    allowed = {ARCHIVE_TITLE, identity_marker(payload), GENERATED_NOTE}
     allowed |= {f"## {h}" for _, h, _ in SECTIONS}
     allowed |= {f"> {lead}" for _, _, lead in SECTIONS if lead}
     for _, items in grouped:
@@ -448,7 +451,7 @@ def test_archive_contains_nothing_beyond_the_contract():
                     " ".join(t.split()) for t in titles))
 
     unexplained = [ln for ln in render_archive(payload, grouped).splitlines()
-                   if ln.strip() and ln not in allowed and not ln.startswith("<!--")]
+                   if ln.strip() and ln not in allowed]
     assert unexplained == [], f"产物里有追溯不到来源的内容：{unexplained}"
 
 
@@ -538,3 +541,48 @@ def test_render_failure_does_not_leak_traceback_type(tmp_path):
         verify_canonical_texts(grouped)
     # 措辞不许一口咬定是「json 太旧」——也可能是工具自己的缺陷。
     assert "也可能是" in str(caught.value)
+
+
+def test_receipt_never_describes_a_file_that_is_not_there(tmp_path, monkeypatch):
+    """重编译时回执写失败 → 宁可没有回执，也不留一份描述旧内容的回执。
+
+    留着旧回执的话，下一次 compile 会比对哈希后（错误地）指控用户手改过档案
+    ——而其实是我们自己换的。回执不变量：**它存在就说明它描述的是盘上那份**。
+    """
+    import kb_init.claude_md as mod
+
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    publish(out, payload, "内容 A", ["T1"])
+    monkeypatch.setattr(mod, "_write_receipt",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        publish(out, payload, "内容 B", ["T1"])
+
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 B"
+    assert not (out / RECEIPT_NAME).exists(), (
+        "留下的回执会描述一份已经不存在的内容——那是产物在撒谎")
+
+
+def test_receipt_matches_the_file_after_a_successful_rerun(tmp_path):
+    """配对正例：正常重跑之后，回执记的哈希必须等于盘上那份的哈希。"""
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    publish(out, payload, "内容 A", ["T1"])
+    path = publish(out, payload, "内容 B", ["T1"])
+    receipt = json.loads((out / RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["archive_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_write_failure_midway_leaves_no_tmp(tmp_path, monkeypatch):
+    """写 tmp 写到一半失败（磁盘满 / 被打断）同样不许留残骸。"""
+    import kb_init.claude_md as mod
+
+    out = _out_dir(tmp_path)
+    monkeypatch.setattr(mod, "_write_exclusive",
+                        lambda p, d: (p.write_bytes(d[:2]),
+                                      (_ for _ in ()).throw(OSError("断了")))[1])
+    with pytest.raises(OSError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert _tmp_leftovers(out) == []
+    assert not (out / LOCK_NAME).exists()

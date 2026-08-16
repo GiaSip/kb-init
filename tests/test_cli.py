@@ -471,3 +471,35 @@ def test_knowledge_symlink_reports_4(tmp_path):
     (tmp_path / "knowledge").symlink_to(elsewhere, target_is_directory=True)
     assert main(["compile", str(tmp_path / "insights.md")]) == 4
     assert not (elsewhere / "CLAUDE.md").exists()
+
+
+def test_missing_knowledge_dir_reports_4_even_when_manifest_is_broken(tmp_path):
+    """目录不见了 + manifest 也坏了：报 4 而不是 7。
+
+    「这个目录根本不是一个 kb-init 输出目录」是最结构性的那个事实，
+    它必须先说；否则用户会去修 manifest，修完才发现目录也没了。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    (tmp_path / "manifest.json").write_text("{不是 json", encoding="utf-8")
+    (tmp_path / "knowledge").rmdir()
+    assert main(["compile", str(tmp_path / "insights.md")]) == 4
+
+
+@pytest.mark.parametrize("field", ["run_id", "corpus_hash"])
+def test_identity_missing_on_both_sides_reports_9_not_traceback(tmp_path, field):
+    """两边同时缺失时 None == None 会放行——那是拿缺失当共识。"""
+    import json
+
+    from kb_init.cli import main
+
+    payload = _write_bundle(tmp_path)
+    del payload[field]
+    (tmp_path / "insights.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    man = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    del man[field]
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(man, ensure_ascii=False), encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 9

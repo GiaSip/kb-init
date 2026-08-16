@@ -164,7 +164,7 @@ def verify_canonical_texts(grouped: Grouped) -> None:
 
 
 ARCHIVE_TITLE = "# 关于这个知识库"
-_GENERATED_NOTE = "<!-- 由 kb-init compile 生成，来自用户逐条确认过的洞察清单。 -->"
+GENERATED_NOTE = "<!-- 由 kb-init compile 生成，来自用户逐条确认过的洞察清单。 -->"
 
 
 def identity_marker(payload: dict) -> str:
@@ -181,7 +181,7 @@ def render_archive(payload: dict, grouped: Grouped) -> str:
     2D 若拿 payload 自己排一句更好看的话，2D 的渲染器升级会犯和 2B 一模一样的病
     ——只是把病从上游挪到了下游。能加的只有结构与静态常量导语。
     """
-    lines = [ARCHIVE_TITLE, "", identity_marker(payload), _GENERATED_NOTE, ""]
+    lines = [ARCHIVE_TITLE, "", identity_marker(payload), GENERATED_NOTE, ""]
     leads = {sid: lead for sid, _, lead in SECTIONS}
     headings = {sid: heading for sid, heading, _ in SECTIONS}
 
@@ -353,8 +353,15 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
         os.close(fd)
         _authorize(target, out_dir, payload)
         data = text.encode("utf-8")
-        _write_exclusive(tmp, data)
+        # 先作废旧回执，再动档案。**不变量：回执存在 ⇒ 它描述的就是盘上那份档案。**
+        # 反过来做的话，「档案换成新的、回执写失败」会留下一份描述着旧哈希的
+        # 回执——它会（错误地）指控用户手改过档案，而其实是我们自己换的。
+        # 一份描述着不存在内容的回执就是在撒谎，宁可没有。
+        (out_dir / RECEIPT_NAME).unlink(missing_ok=True)
         try:
+            # 写 tmp 也放进这个 try：写到一半失败（磁盘满、被打断）同样会
+            # 留下半份 .tmp，而残骸会让下一个人误判发生过什么。
+            _write_exclusive(tmp, data)
             if target.exists():
                 os.replace(tmp, target)
             else:
