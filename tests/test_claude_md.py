@@ -6,9 +6,13 @@ import pytest
 
 from kb_init.claude_md import (
     ArchiveContractError,
+    ArchiveEmptyError,
     KNOWN_SECTIONS,
     SECTIONS,
     check_structure,
+    render_archive,
+    select_for_archive,
+    verify_canonical_texts,
 )
 
 REQUIRED_KEYS = ("insight_id", "family", "kind", "payload",
@@ -125,3 +129,156 @@ def test_insights_must_be_a_list():
     with pytest.raises(ArchiveContractError):
         check_structure({"schema_version": "0.1", "run_id": "r1",
                          "corpus_hash": "c1", "insights": {"T1": {}}})
+
+
+# ---------------- 选择（过滤 + 分节） ----------------
+
+def _all_checked(payload):
+    return {i["insight_id"]: True for i in payload["insights"]}
+
+
+def test_unchecked_items_are_excluded():
+    payload = _payload(_insight("T1"), _insight("T2"))
+    grouped = select_for_archive(payload, {"T1": True, "T2": False})
+    assert [i["insight_id"] for _, items in grouped for i in items] == ["T1"]
+
+
+def test_null_claude_md_never_enters_archive():
+    """corpus 族勾着也不进：留存率、断链数对 agent 无用。"""
+    payload = _payload(_insight("T1"), _insight("C1", section=None))
+    grouped = select_for_archive(payload, _all_checked(payload))
+    assert [i["insight_id"] for _, items in grouped for i in items] == ["T1"]
+
+
+def test_section_and_item_order_follows_json():
+    """节序按 SECTIONS，节内序按数组序。
+
+    构造时故意把 coverage 放在数组最前、T2 放在 T1 之前——否则「顺序对」
+    这条断言在一个原样返回的实现上也永远成立。
+    """
+    payload = _payload(_insight("R1", section="coverage"),
+                       _insight("T2"), _insight("T1"))
+    grouped = select_for_archive(payload, _all_checked(payload))
+    assert [s for s, _ in grouped] == ["focus_areas", "coverage"]
+    assert [i["insight_id"] for i in grouped[0][1]] == ["T2", "T1"]
+
+
+def test_empty_sections_do_not_appear():
+    payload = _payload(_insight("T1"))
+    assert [s for s, _ in select_for_archive(payload, _all_checked(payload))] \
+        == ["focus_areas"]
+
+
+def test_empty_selection_raises_empty():
+    payload = _payload(_insight("T1"), _insight("T2"))
+    with pytest.raises(ArchiveEmptyError):
+        select_for_archive(payload, {"T1": False, "T2": False})
+
+
+def test_only_null_routed_insights_raises_empty():
+    """全是 corpus 族且全勾着 → 依然是「没有条目能进档案」，不是「用户没勾」。"""
+    payload = _payload(_insight("C1", section=None), _insight("C2", section=None))
+    with pytest.raises(ArchiveEmptyError):
+        select_for_archive(payload, _all_checked(payload))
+
+
+# ---------------- canonical_text 校验 ----------------
+
+def _real_insight(**over):
+    """用真渲染器造一条 canonical_text 名副其实的洞察。"""
+    from kb_init.insights import Insight, render
+
+    payload = {"count": 15, "share_of_kept": 0.75}
+    text = render(Insight("R1", "residual", "fragment_zone", payload, ""))
+    item = {"insight_id": "R1", "family": "residual", "kind": "fragment_zone",
+            "payload": payload, "canonical_text": text,
+            "evidence": {"doc_ids": [], "stat": None},
+            "claude_md": {"section": "coverage"}}
+    item.update(over)
+    return item
+
+
+def test_verify_canonical_passes_on_untampered():
+    payload = _payload(_real_insight())
+    verify_canonical_texts(select_for_archive(payload, _all_checked(payload)))
+
+
+def test_verify_canonical_detects_tampering():
+    payload = _payload(_real_insight(canonical_text="我自己改的一句话"))
+    grouped = select_for_archive(payload, _all_checked(payload))
+    with pytest.raises(ArchiveContractError, match="R1"):
+        verify_canonical_texts(grouped)
+
+
+def test_verify_canonical_ignores_unarchived():
+    """只校验进档案的那几条。未进档案的条目文案变了不该挡住用户。"""
+    tampered = _real_insight(insight_id="C1", claude_md=None,
+                             canonical_text="对不上的文案")
+    payload = _payload(_real_insight(), tampered)
+    verify_canonical_texts(select_for_archive(payload, _all_checked(payload)))
+
+
+def test_verify_canonical_rejects_unknown_kind():
+    """kind 是本版渲染器没有的 → 同样是「json 与本版对不上」，不是崩溃。"""
+    payload = _payload(_real_insight(kind="future_kind"))
+    grouped = select_for_archive(payload, _all_checked(payload))
+    with pytest.raises(ArchiveContractError):
+        verify_canonical_texts(grouped)
+
+
+# ---------------- 渲染 ----------------
+
+def _render_all(payload):
+    return render_archive(payload, select_for_archive(payload, _all_checked(payload)))
+
+
+def test_body_is_canonical_text_verbatim():
+    """逐字。2D 若自己排一句更好看的，2D 的渲染器升级会犯和 2B 一模一样的病。"""
+    payload = _payload(_insight("T1", canonical_text="这 29 篇里最具区分度的词是 甲 · 乙"))
+    assert "- 这 29 篇里最具区分度的词是 甲 · 乙" in _render_all(payload).splitlines()
+
+
+def test_evidence_line_folds_whitespace_only():
+    item = _insight("T1")
+    item["payload"]["evidence_titles"] = ["带  多余   空格", "跨\n行"]
+    line = [ln for ln in _render_all(_payload(item)).splitlines()
+            if "证据" in ln][0]
+    assert "带 多余 空格" in line and "跨 行" in line
+
+
+def test_empty_evidence_titles_emits_no_evidence_line():
+    item = _insight("T1")
+    item["payload"]["evidence_titles"] = []
+    assert "证据" not in _render_all(_payload(item))
+
+
+def test_missing_evidence_titles_key_is_fine():
+    item = _insight("T1")
+    del item["payload"]["evidence_titles"]
+    assert "证据" not in _render_all(_payload(item))
+
+
+def test_lead_is_static_and_corpus_independent():
+    """同一节的导语在两份差异很大的语料上必须逐字相同（Codex 审 #7）。"""
+    a = _payload(_insight("T1"), run_id="ra", corpus_hash="ca")
+    b = _payload(_insight("T1", canonical_text="完全不同的一句"),
+                 run_id="rb", corpus_hash="cb")
+    lead = [ln for ln in _render_all(a).splitlines() if ln.startswith(">")]
+    assert lead and lead == [ln for ln in _render_all(b).splitlines()
+                             if ln.startswith(">")]
+
+
+def test_header_carries_identity():
+    out = _render_all(_payload(_insight("T1")))
+    assert "<!-- kb-init:claude_md run_id=r1 corpus_hash=c1 schema_version=0.1 -->" in out
+
+
+def test_headings_come_from_sections_table():
+    payload = _payload(_insight("T1"), _insight("R1", section="coverage"))
+    out = _render_all(payload)
+    assert "## 关注领域" in out and "## 这份档案的覆盖范围" in out
+    assert out.index("## 关注领域") < out.index("## 这份档案的覆盖范围")
+
+
+def test_archive_ends_with_single_newline():
+    assert _render_all(_payload(_insight("T1"))).endswith("\n")

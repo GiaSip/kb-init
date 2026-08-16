@@ -98,3 +98,93 @@ def _check_route(insight_id: str, claude_md) -> None:
             f"（认识的是 {sorted(KNOWN_SECTIONS)}）。"
             f"认不出就不输出会让这一节静默消失，而没人会来报「我的档案少了一节」"
             f"——请用当前版本重跑一次。")
+
+
+Grouped = list[tuple[str, list[dict]]]
+
+
+def select_for_archive(payload: dict, selections: dict[str, bool]) -> Grouped:
+    """只收「勾了」且「声明了去向」的条目，按 SECTIONS 分节。
+
+    节序由 SECTIONS 决定，节内序等于 `insights` 数组序——**不重排**
+    （沿用 2B「group_refs 有序，下游不得自行重排」的同一条纪律）。
+    """
+    by_section: dict[str, list[dict]] = {}
+    for item in payload["insights"]:
+        route = item["claude_md"]
+        if route is None:
+            continue
+        if selections.get(item["insight_id"]) is not True:
+            continue
+        by_section.setdefault(route["section"], []).append(item)
+
+    grouped = [(sid, by_section[sid]) for sid, _, _ in SECTIONS if by_section.get(sid)]
+    if not grouped:
+        raise ArchiveEmptyError(
+            "没有任何条目能进档案：勾选的条目要么没被勾上，要么只进 Wrapped "
+            "（语料层统计对 agent 无用）。一份空档案落在知识库根目录，"
+            "agent 会当真读它，等于宣布「你没有关注领域」——所以这里什么都不写。")
+    return grouped
+
+
+def verify_canonical_texts(grouped: Grouped) -> None:
+    """对**进档案的每一条**断言 render(payload) == canonical_text。
+
+    双载合同要防的是「渲染器一升级，compile 就编译出用户从没审过的文字」。
+    只校验进档案的那几条：corpus 族的文案与档案无关，让它挡住用户是无谓的严格。
+    """
+    from kb_init.insights import Insight, render
+
+    for _, items in grouped:
+        for item in items:
+            insight = Insight(item["insight_id"], item["family"], item["kind"],
+                              item["payload"], "")
+            try:
+                expected = render(insight)
+            except (KeyError, TypeError) as exc:
+                raise ArchiveContractError(
+                    f"{item['insight_id']} 的 kind「{item['kind']}」"
+                    f"本版渲染器算不出来（{exc}）——这份 insights.json 不是"
+                    f"当前版本产出的，请用当前版本重跑一次。") from exc
+            if expected != item["canonical_text"]:
+                raise ArchiveContractError(
+                    f"{item['insight_id']} 的 canonical_text 与 payload 对不上。"
+                    f"档案里必须是用户审过的那句话，而这一句不是——"
+                    f"请用当前版本重跑一次。")
+
+
+ARCHIVE_TITLE = "# 关于这个知识库"
+_GENERATED_NOTE = "<!-- 由 kb-init compile 生成，来自用户逐条确认过的洞察清单。 -->"
+
+
+def identity_marker(payload: dict) -> str:
+    """档案头部的出处标记。**它不是覆盖授权的依据**——授权走回执 + 内容哈希。
+    把授权建立在一行印在产物里的标记上，等于把钥匙印在门上。"""
+    return (f"<!-- kb-init:claude_md run_id={payload['run_id']} "
+            f"corpus_hash={payload['corpus_hash']} "
+            f"schema_version={payload['schema_version']} -->")
+
+
+def render_archive(payload: dict, grouped: Grouped) -> str:
+    """正文**逐字**是 canonical_text。
+
+    2D 若拿 payload 自己排一句更好看的话，2D 的渲染器升级会犯和 2B 一模一样的病
+    ——只是把病从上游挪到了下游。能加的只有结构与静态常量导语。
+    """
+    lines = [ARCHIVE_TITLE, "", identity_marker(payload), _GENERATED_NOTE, ""]
+    leads = {sid: lead for sid, _, lead in SECTIONS}
+    headings = {sid: heading for sid, heading, _ in SECTIONS}
+
+    for section_id, items in grouped:
+        lines += [f"## {headings[section_id]}", ""]
+        if leads[section_id]:
+            lines += [f"> {leads[section_id]}", ""]
+        for item in items:
+            lines.append(f"- {item['canonical_text']}")
+            titles = (item.get("payload") or {}).get("evidence_titles") or []
+            if titles:
+                shown = " · ".join(
+                    " ".join((t or "").split()) or "（无标题）" for t in titles)
+                lines.append(f"  证据：{shown}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
