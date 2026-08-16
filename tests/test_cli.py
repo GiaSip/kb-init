@@ -679,3 +679,24 @@ def test_share_write_failure_says_the_archive_is_fine(tmp_path, monkeypatch, cap
     err = capsys.readouterr().err
     assert "档案已写入" in err and "分享版" in err
     assert (tmp_path / "knowledge" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("cmd", ["validate", "compile"])
+def test_missing_path_reports_not_found_not_usage_error(tmp_path, cmd, capsys):
+    """路径打错时报「用法错误」是在指错方向：用法是对的，错的是文件不在。
+
+    用户会去检查命令怎么写，而不是去看路径——报错码指错方向，人就会做错事。
+    """
+    from kb_init.cli import main
+
+    assert main([cmd, str(tmp_path / "没有这个文件.md")]) == 7
+    assert "找不到" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("cmd", ["validate", "compile"])
+def test_bare_subcommand_still_reports_usage(tmp_path, cmd, capsys):
+    """配对正例：真的用法错误（没给参数）仍然是 2，不能被上一条吃掉。"""
+    from kb_init.cli import main
+
+    assert main([cmd]) == 2
+    assert "用法" in capsys.readouterr().err
