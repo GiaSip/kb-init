@@ -325,11 +325,15 @@ def main(argv: list[str] | None = None) -> int:
             and Path(argv[1]).is_file()):
         return subcommands[argv[0]](argv[1])
     if (len(argv) == 2 and argv[0] in subcommands
+            and not argv[1].startswith("-")          # `compile --help` 不是路径
             and not Path(argv[1]).exists() and not Path(argv[0]).exists()):
         # 路径打错时报「用法错误」是在指错方向：用法明明是对的，错的是那个文件
         # 不在。用户会去检查命令怎么写，而不是去看路径——**报错码指错方向，
         # 人就会做错事**，这与 7 / 9 分开的理由是同一条。
         print(f"错误：找不到 {argv[1]}", file=sys.stderr)
+        # 路径打错但目录对（最常见的那种手误）时，旧分享版照样躺在那儿。
+        # 这个提醒只在那个文件真的存在时才会打印，所以不会误伤无关目录。
+        _warn_if_stale_share_report(Path(argv[1]).parent)
         return 7
     if argv and argv[0] in subcommands and not Path(argv[0]).exists():
         print(f"用法：kb-init {argv[0]} <insights.md>", file=sys.stderr)

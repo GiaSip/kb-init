@@ -700,3 +700,16 @@ def test_bare_subcommand_still_reports_usage(tmp_path, cmd, capsys):
 
     assert main([cmd]) == 2
     assert "用法" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--help", "-h", "--version"])
+def test_subcommand_with_a_flag_is_not_treated_as_a_missing_path(tmp_path, flag,
+                                                                  capsys):
+    """`kb-init compile --help` 不该被报成「找不到 --help」。
+
+    这是三审那条分流引入的回归：以 - 开头的参数是选项不是路径。
+    """
+    from kb_init.cli import main
+
+    assert main(["compile", flag]) == 2
+    assert "找不到" not in capsys.readouterr().err
