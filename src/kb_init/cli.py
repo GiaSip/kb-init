@@ -35,6 +35,44 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _BundleError(Exception):
+    """洞察三件套（insights.md / insights.json / manifest.json）配不成对。"""
+
+
+def _locate_bundle(md: Path) -> dict:
+    """`validate` 与 `compile` **共用**的配对定位与 manifest gate。
+
+    两个读取入口必须是同一套标准：只要有一个入口对 manifest 网开一面，
+    「清理失败时留下的半份产物不算数」这条规则就会被它绕过。所以这段逻辑
+    只存在一份，两个命令都从这里进。
+    """
+    import json
+
+    if not md.exists():
+        raise _BundleError(f"找不到 {md}")
+    json_path = md.with_name("insights.json")
+    if not json_path.exists():
+        raise _BundleError(f"同目录下找不到 insights.json（{json_path}）。"
+                           f"需要两份文件配对。")
+    # 清理失败时我们刻意把半份产物留在盘上（为了不牵连完好的清洗产物），
+    # 那笔账记在 manifest 里——读取入口不去问，这条兜底就形同虚设。
+    manifest_path = md.with_name("manifest.json")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        status = manifest["insights_status"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # 缺失 / 损坏 / 没这个字段 / 顶层不是对象（`[]`、`null`、字符串——
+        # 下标会抛 TypeError），四种都拒绝，不「读不到就跳过」。
+        raise _BundleError(
+            f"读不到 {manifest_path} 里的 insights_status（{exc}），"
+            f"无法确认这两份文件算不算数。它们必须与 manifest 放在一起。") from exc
+    if status != "complete":
+        raise _BundleError(
+            f"manifest 说这次运行的洞察状态是 {status!r}，不是 complete"
+            f"——这两份文件可能是残留或半成品，拒绝使用。")
+    return {"json_path": json_path, "manifest": manifest}
+
+
 def _validate_command(md_path: str) -> int:
     """`kb-init validate <insights.md>`：独立校验勾选清单与它的 json 真源。
 
@@ -46,37 +84,13 @@ def _validate_command(md_path: str) -> int:
     from kb_init.insights_md import InsightsValidationError, validate_markdown
 
     md = Path(md_path)
-    json_path = md.with_name("insights.json")
-    if not md.exists():
-        print(f"错误：找不到 {md}", file=sys.stderr)
-        return 7
-    if not json_path.exists():
-        print(f"错误：同目录下找不到 insights.json（{json_path}）。"
-              f"校验需要两份文件配对。", file=sys.stderr)
-        return 7
-    # 先问 manifest 这两份洞察文件算不算数。清理失败时我们刻意把半份产物留在
-    # 盘上（为了不牵连完好的清洗产物），那笔账记在 manifest 里——
-    # 读取入口不去问，这条兜底就形同虚设。
-    manifest_path = md.with_name("manifest.json")
     try:
-        status = json.loads(
-            manifest_path.read_text(encoding="utf-8")
-        )["insights_status"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        # 缺失 / 损坏 / 没这个字段 / 顶层不是对象（`[]`、`null`、字符串——
-        # 下标会抛 TypeError），四种都拒绝，不「读不到就跳过」。
-        # read_index 那边已经是拒读，这里放行就等于两个入口两套标准——
-        # 而只要留一条兜底路径，规则就会被它绕过。
-        print(f"错误：读不到 {manifest_path} 里的 insights_status（{exc}），"
-              f"无法确认这两份文件算不算数。校验需要它们与 manifest 放在一起。",
-              file=sys.stderr)
-        return 7
-    if status != "complete":
-        print(f"错误：manifest 说这次运行的洞察状态是 {status!r}，不是 complete"
-              f"——这两份文件可能是残留或半成品，拒绝校验。", file=sys.stderr)
+        bundle = _locate_bundle(md)
+    except _BundleError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
         return 7
     try:
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        payload = json.loads(bundle["json_path"].read_text(encoding="utf-8"))
         validate_markdown(md.read_text(encoding="utf-8"), payload)
     except InsightsValidationError as exc:
         print(f"错误：{exc}", file=sys.stderr)
@@ -88,6 +102,127 @@ def _validate_command(md_path: str) -> int:
     return 0
 
 
+def _compile_command(md_path: str) -> int:
+    """`kb-init compile <insights.md>`：把勾选过的洞察编译成知识库的 CLAUDE.md。
+
+    gate 顺序不是随便排的（2D spec §5）：**版本与身份 gate 必须早于
+    validate_markdown**。否则一份旧的或来自另一次运行的 insights.json 会被报成
+    7「你手上这份清单不合法」，把用户支去改一份根本没有问题的文件——
+    7 的修复动作在用户手上，9 的在工具手上，报错码指错方向，人就会做错事。
+
+    **结构 gate 必须早于按勾选过滤**，理由见 claude_md.check_structure。
+    """
+    import json
+
+    from kb_init.claude_md import (
+        ArchiveContractError,
+        ArchiveEmptyError,
+        ArchiveOverwriteError,
+        check_archive_dir,
+        check_structure,
+        publish,
+        render_archive,
+        select_for_archive,
+        verify_canonical_texts,
+    )
+    from kb_init.insights import SCHEMA_VERSION
+    from kb_init.insights_md import (
+        InsightsValidationError,
+        parse_markdown,
+        validate_markdown,
+    )
+
+    md = Path(md_path)
+    try:
+        # **第一个** gate，早于 manifest：目录被删掉时若拖到后面才发现，
+        # 用户会先看到「manifest 对不上」（7）、「你一条都没勾」（8）或
+        # 「json 对不上」（9）——诊断指向完全错误的方向。
+        # 「这个目录根本不是一个 kb-init 输出目录」是最结构性的那个事实，
+        # 它该先说。
+        check_archive_dir(md.parent)
+    except OSError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 4
+    try:
+        bundle = _locate_bundle(md)
+    except _BundleError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 7
+
+    manifest = bundle["manifest"]
+    try:
+        try:
+            payload = json.loads(bundle["json_path"].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            # compile 的码空间比 validate 细：读不动的 json 不是「你的清单不合法」，
+            # 是「这份真源不能用」，修复动作是重跑。
+            raise ArchiveContractError(
+                f"读不了 {bundle['json_path']}（{exc}）。") from exc
+        if not isinstance(payload, dict):
+            raise ArchiveContractError("insights.json 的顶层不是对象。")
+        if payload.get("schema_version") != SCHEMA_VERSION:
+            raise ArchiveContractError(
+                f"insights.json 是 schema {payload.get('schema_version')!r}，"
+                f"本版 kb-init 认的是 {SCHEMA_VERSION!r}——"
+                f"两者不是同一版格式，请用当前版本重跑一次。")
+        for field in ("run_id", "corpus_hash"):
+            got = payload.get(field)
+            # 只比相等是不够的：两边**同时缺失**时 None == None 会放行，
+            # 而后面 identity_marker 取 payload["run_id"] 会裸抛 KeyError
+            # ——用户拿到的是一段 traceback，不是诊断。
+            # 「两边都没有」不等于「两边一致」，那是拿缺失当共识。
+            if not isinstance(got, str) or not got:
+                raise ArchiveContractError(
+                    f"insights.json 里没有可用的 {field}（{got!r}）——"
+                    f"这份文件缺少身份，无法确认它属于哪一次运行。")
+            if manifest.get(field) != got:
+                raise ArchiveContractError(
+                    f"manifest 的 {field} 是 {manifest.get(field)!r}，"
+                    f"insights.json 是 {got!r}——"
+                    f"这两份文件不是同一次运行的产物。")
+        check_structure(payload)
+    except ArchiveContractError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 9
+
+    try:
+        text_md = md.read_text(encoding="utf-8")
+        validate_markdown(text_md, payload)
+    except InsightsValidationError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 7
+    except OSError as exc:
+        print(f"错误：读不了 {md}——{exc}", file=sys.stderr)
+        return 4
+
+    selections = parse_markdown(text_md)["selections"]
+    try:
+        grouped = select_for_archive(payload, selections)
+        verify_canonical_texts(grouped)
+        archive = publish(
+            md.parent, payload, render_archive(payload, grouped),
+            [i["insight_id"] for _, items in grouped for i in items])
+    except ArchiveEmptyError as exc:
+        # 8 而不是 0：什么都没写却返回成功，脚本会以为档案在那儿。
+        print(f"错误：{exc}", file=sys.stderr)
+        return 8
+    except ArchiveContractError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 9
+    except ArchiveOverwriteError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"错误：写入失败——{exc}", file=sys.stderr)
+        return 4
+
+    count = sum(len(items) for _, items in grouped)
+    print(f"已写入 {archive}")
+    print(f"  收录 {count} 条洞察，分 {len(grouped)} 节"
+          f"（未勾选的、以及只进 Wrapped 的条目不在其中）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # 不用 argparse subparsers：现有用法 `kb-init <source>` 是位置参数，
     # 改成子命令解析会把它弄坏（下面有一条测试专盯这个）。
@@ -95,11 +230,12 @@ def main(argv: list[str] | None = None) -> int:
     # 只在「恰好两个参数、且第二个是已存在的文件」时才认作子命令。
     # 无条件按首参数分流会让一个真叫 validate 的目录再也无法作为 source 处理
     # ——那是拿一个合法输入名去换命令语法，代价方向反了。
-    if (len(argv) == 2 and argv[0] == "validate"
+    subcommands = {"validate": _validate_command, "compile": _compile_command}
+    if (len(argv) == 2 and argv[0] in subcommands
             and Path(argv[1]).is_file()):
-        return _validate_command(argv[1])
-    if argv and argv[0] == "validate" and not Path(argv[0]).exists():
-        print("用法：kb-init validate <insights.md>", file=sys.stderr)
+        return subcommands[argv[0]](argv[1])
+    if argv and argv[0] in subcommands and not Path(argv[0]).exists():
+        print(f"用法：kb-init {argv[0]} <insights.md>", file=sys.stderr)
         return 2
 
     parser = build_parser()

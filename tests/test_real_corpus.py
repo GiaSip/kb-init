@@ -201,3 +201,39 @@ def test_real_topic_keywords_are_never_empty(tmp_path):
     for item in topics:
         assert item["payload"]["keywords"], item["insight_id"]
         assert len(item["payload"]["evidence_doc_ids"]) == 3
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not APPLE.exists(), reason="Apple Notes 语料不在本机")
+def test_compile_produces_an_archive_on_real_corpus(tmp_path):
+    """端到端：跑完整链路 → compile → 档案。
+
+    合成语料测不出真实形态（这个项目最贵的教训），所以档案线的验收必须落在
+    真实语料上：真实的证据标题会带 emoji、整段话、换行；真实的 canonical_text
+    会带百分号与中点。
+    """
+    import json
+
+    from kb_init.cli import main
+
+    out = tmp_path / "out"
+    run(APPLE, out, run_id="acceptance-apple-compile")
+    assert main(["compile", str(out / "insights.md")]) == 0
+
+    archive = (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8")
+    payload = json.loads((out / "insights.json").read_text(encoding="utf-8"))
+
+    archived = [i for i in payload["insights"] if i["claude_md"]]
+    assert archived, "空列表会让下面的断言恒真"
+    for item in archived:
+        # 逐字：档案里的正文必须正是用户在清单上审过的那一句
+        assert f"- {item['canonical_text']}" in archive.splitlines(), item["insight_id"]
+    for item in payload["insights"]:
+        if item["claude_md"] is None:
+            assert item["canonical_text"] not in archive, item["insight_id"]
+
+    assert "## 关注领域" in archive
+    assert "## 这份档案的覆盖范围" in archive, "R1 应当进档案线"
+    # 开源卫生 + 隐私：产物里不许出现本机绝对路径
+    assert "/Users/" not in archive
+    assert (out / "compile.json").exists()

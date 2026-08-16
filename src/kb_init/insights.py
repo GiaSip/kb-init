@@ -324,11 +324,15 @@ def build_residual_insights(
     if not residual:
         return []
 
+    # R1 进档案线：主题只覆盖 kept 的 16–23%，档案不说这一句，agent 就会把
+    # 那一小部分当成全集（2D spec §2.3）。走和主题完全同一条路——同样进
+    # insights.md 让用户勾、同样用 canonical_text——所以 2D 不需要为它加特例。
     out = [_with_text(Insight(
         "R1", "residual", "fragment_zone",
         {"count": len(residual),
          "share_of_kept": round(len(residual) / kept_count, 6) if kept_count else 0.0},
-        "", {"doc_ids": [], "stat": {"count": len(residual)}}, None))]
+        "", {"doc_ids": [], "stat": {"count": len(residual)}},
+        {"section": "coverage"}))]
 
     # 纯按长度排序，**不做任何归属**——「这几篇贴着某个主题的边」是 halo 判断，
     # 不落 membership 字段也仍然是软归属，那属于方案 C 的范围。
