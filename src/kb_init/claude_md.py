@@ -188,3 +188,131 @@ def render_archive(payload: dict, grouped: Grouped) -> str:
                 lines.append(f"  证据：{shown}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+RECEIPT_NAME = "compile.json"
+LOCK_NAME = ".kb-init-compile.lock"
+ARCHIVE_DIR = "knowledge"
+ARCHIVE_NAME = "CLAUDE.md"
+RECEIPT_SCHEMA_VERSION = "0.1"
+
+
+def _sha256(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+def _read_receipt(out_dir) -> dict | None:
+    import json
+
+    try:
+        receipt = json.loads((out_dir / RECEIPT_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return receipt if isinstance(receipt, dict) else None
+
+
+def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) -> None:
+    import json
+    import os
+
+    from kb_init import __version__
+
+    receipt = {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
+        "run_id": payload["run_id"],
+        "corpus_hash": payload["corpus_hash"],
+        "tool_version": __version__,
+        "archive_path": f"{ARCHIVE_DIR}/{ARCHIVE_NAME}",
+        "archive_sha256": digest,
+        "insight_ids": list(insight_ids),
+    }
+    tmp = out_dir / f".{RECEIPT_NAME}.tmp"
+    tmp.write_text(json.dumps(receipt, ensure_ascii=False, indent=2),
+                   encoding="utf-8")
+    os.replace(tmp, out_dir / RECEIPT_NAME)
+
+
+def _authorize(target, out_dir, payload: dict) -> None:
+    """三条全满足才允许替换：回执在且 run_id 一致 / 现存文件哈希等于回执所记 /
+    目标不是符号链接。
+
+    授权不看产物里那行出处标记——它印在产物里，谁都能复制。
+    """
+    if target.is_symlink():
+        raise ArchiveOverwriteError(
+            f"{target} 是一个符号链接。绝不跟随符号链接写——那能把任意路径"
+            f"变成写入目标。删掉它再重跑。")
+    if not target.exists():
+        return
+
+    receipt = _read_receipt(out_dir)
+    if receipt is None:
+        raise ArchiveOverwriteError(
+            f"{target} 已经存在，但 {out_dir / RECEIPT_NAME} 里没有本工具写过它的"
+            f"记录——它可能是你自己的一篇笔记。拒绝覆盖。确认不要之后删掉它再重跑。")
+    if receipt.get("run_id") != payload["run_id"]:
+        raise ArchiveOverwriteError(
+            f"{target} 是另一次运行（{receipt.get('run_id')}）写下的，"
+            f"本次是 {payload['run_id']}。拒绝覆盖。")
+    try:
+        actual = _sha256(target.read_bytes())
+    except OSError as exc:
+        raise ArchiveOverwriteError(f"读不了 {target}（{exc}），拒绝覆盖。") from exc
+    if actual != receipt.get("archive_sha256"):
+        raise ArchiveOverwriteError(
+            f"{target} 自上次生成之后被改动过。那是你的编辑，不该被无声抹掉——"
+            f"拒绝覆盖。想重新生成就先删掉它。")
+
+
+def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
+    """授权 → 原子写档案 → 写回执。返回档案路径。
+
+    顺序是「先档案后回执」：两个文件做不到共同原子，就把失败留在信息量最小的
+    地方。回执写失败时**档案保留**（失败不许带走已完成的产物），代价是下次
+    compile 会拒绝覆盖它——诊断里说清楚，不给它开后门。
+    """
+    import os
+    from pathlib import Path
+
+    out_dir = Path(out_dir)
+    archive_dir = out_dir / ARCHIVE_DIR
+    if not archive_dir.is_dir():
+        # 不创建：能走到 compile 就说明流水线跑完过，knowledge/ 本来就该在。
+        # 造一个只装着档案、没有任何知识的 knowledge/，是在造一个撒谎的产物。
+        raise OSError(
+            f"找不到 {archive_dir}（或它不是目录）。档案要和清洗产物放在一起，"
+            f"而这个目录本该由上一步生成——请确认 -o 指的是完整的输出目录。")
+
+    lock = out_dir / LOCK_NAME
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError as exc:
+        # 不做超时自动清锁：「等久了就当它死了」是典型的兜底路径，
+        # 而残锁的正确处置是人看一眼再删。
+        raise OSError(
+            f"另一个 compile 正在这个目录里运行（锁文件 {lock}）。"
+            f"确认没有之后，删掉这个锁文件再重跑。") from exc
+    os.close(fd)
+
+    target = archive_dir / ARCHIVE_NAME
+    tmp = archive_dir / f".{ARCHIVE_NAME}.tmp"
+    try:
+        _authorize(target, out_dir, payload)
+        data = text.encode("utf-8")
+        tmp.write_bytes(data)
+        try:
+            if target.exists():
+                os.replace(tmp, target)
+            else:
+                # 新建走 link：原子且独占——「检查时不存在」与「创建」之间
+                # 不留窗口，别的进程抢先建了就会抛而不是被我们覆盖。
+                os.link(tmp, target)
+                tmp.unlink()
+        finally:
+            tmp.unlink(missing_ok=True)
+        _write_receipt(out_dir, payload, _sha256(data), insight_ids)
+    finally:
+        lock.unlink(missing_ok=True)
+    return target

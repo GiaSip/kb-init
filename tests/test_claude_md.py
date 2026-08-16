@@ -2,14 +2,22 @@
 
 ⚠️ 这里的 CLAUDE.md 指**用户知识库的**那份，不是本仓库根目录那份。
 """
+import hashlib
+import json
+
 import pytest
 
 from kb_init.claude_md import (
     ArchiveContractError,
     ArchiveEmptyError,
+    ArchiveOverwriteError,
+    LOCK_NAME,
+    RECEIPT_NAME,
     KNOWN_SECTIONS,
     SECTIONS,
     check_structure,
+    identity_marker,
+    publish,
     render_archive,
     select_for_archive,
     verify_canonical_texts,
@@ -282,3 +290,133 @@ def test_headings_come_from_sections_table():
 
 def test_archive_ends_with_single_newline():
     assert _render_all(_payload(_insight("T1"))).endswith("\n")
+
+
+# ---------------- 覆盖授权与写盘 ----------------
+
+def _out_dir(tmp_path):
+    (tmp_path / "knowledge").mkdir()
+    return tmp_path
+
+
+def test_writes_when_absent(tmp_path):
+    out = _out_dir(tmp_path)
+    path = publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert path.read_text(encoding="utf-8") == "内容 A"
+    receipt = json.loads((out / RECEIPT_NAME).read_text(encoding="utf-8"))
+    assert receipt["run_id"] == "r1"
+    assert receipt["archive_sha256"] == hashlib.sha256(
+        "内容 A".encode()).hexdigest()
+    assert receipt["insight_ids"] == ["T1"]
+
+
+def test_rerun_replaces_own_output(tmp_path):
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    publish(out, payload, "内容 A", ["T1"])
+    path = publish(out, payload, "内容 B", ["T1"])
+    assert path.read_text(encoding="utf-8") == "内容 B"
+
+
+def test_refuses_to_overwrite_foreign_file(tmp_path):
+    """模拟语料里真有一篇笔记被清洗后就叫 CLAUDE.md。覆盖它就是数据损坏。"""
+    out = _out_dir(tmp_path)
+    note = out / "knowledge" / "CLAUDE.md"
+    note.write_text("我自己写的一篇笔记", encoding="utf-8")
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert note.read_text(encoding="utf-8") == "我自己写的一篇笔记"
+
+
+def test_forged_marker_does_not_authorize(tmp_path):
+    """把出处标记复制进一篇真笔记，也不构成授权（Codex 审 #1）。
+
+    授权若只看产物里那行标记，那行标记就是印在门上的钥匙。
+    """
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    note = out / "knowledge" / "CLAUDE.md"
+    note.write_text(identity_marker(payload) + "\n我自己写的一篇笔记",
+                    encoding="utf-8")
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, payload, "内容 A", ["T1"])
+    assert "我自己写的一篇笔记" in note.read_text(encoding="utf-8")
+
+
+def test_refuses_when_archive_hand_edited(tmp_path):
+    """用户手改过档案 → 那是他的编辑，不该被无声抹掉。"""
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    path = publish(out, payload, "内容 A", ["T1"])
+    path.write_text("内容 A\n我加的一行", encoding="utf-8")
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, payload, "内容 B", ["T1"])
+    assert path.read_text(encoding="utf-8") == "内容 A\n我加的一行"
+
+
+def test_refuses_when_receipt_from_other_run(tmp_path):
+    out = _out_dir(tmp_path)
+    publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    other = _payload(_insight("T1"), run_id="r2")
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, other, "内容 B", ["T1"])
+
+
+def test_refuses_symlink_target(tmp_path):
+    """绝不跟随符号链接写——那能把任意路径变成写入目标。"""
+    out = _out_dir(tmp_path)
+    victim = tmp_path / "victim.md"
+    victim.write_text("别人的文件", encoding="utf-8")
+    (out / "knowledge" / "CLAUDE.md").symlink_to(victim)
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert victim.read_text(encoding="utf-8") == "别人的文件"
+
+
+def test_missing_knowledge_dir_is_error_not_created(tmp_path):
+    """不创建：一个只装着档案、没有知识的 knowledge/ 是个撒谎的产物。"""
+    with pytest.raises(OSError):
+        publish(tmp_path, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert not (tmp_path / "knowledge").exists()
+
+
+def test_lock_blocks_concurrent_compile(tmp_path):
+    out = _out_dir(tmp_path)
+    (out / LOCK_NAME).write_text("", encoding="utf-8")
+    with pytest.raises(OSError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert not (out / "knowledge" / "CLAUDE.md").exists()
+
+
+def test_lock_released_on_success_and_on_failure(tmp_path):
+    """负例配对：只测成功路径的话，finally 漏写不会被发现。"""
+    out = _out_dir(tmp_path)
+    publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert not (out / LOCK_NAME).exists()
+
+    (out / "knowledge" / "CLAUDE.md").write_text("外来文件", encoding="utf-8")
+    (out / RECEIPT_NAME).unlink()
+    with pytest.raises(ArchiveOverwriteError):
+        publish(out, _payload(_insight("T1")), "内容 B", ["T1"])
+    assert not (out / LOCK_NAME).exists()
+
+
+def test_no_tmp_left_behind(tmp_path):
+    out = _out_dir(tmp_path)
+    publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert [p.name for p in (out / "knowledge").iterdir()] == ["CLAUDE.md"]
+
+
+def test_receipt_write_failure_keeps_archive(tmp_path, monkeypatch):
+    """硬不变量 #2：失败不许带走已完成的产物。"""
+    out = _out_dir(tmp_path)
+    import kb_init.claude_md as mod
+
+    def boom(*a, **k):
+        raise OSError("回执写不进去")
+
+    monkeypatch.setattr(mod, "_write_receipt", boom)
+    with pytest.raises(OSError):
+        publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
+    assert not (out / LOCK_NAME).exists()
