@@ -88,7 +88,9 @@ def _insight(iid, family="topic", kind="topic_cluster", **over):
         "payload": {"keywords": ["排版", "typography"], "doc_count": 9,
                     "share_of_kept": 0.031,
                     "evidence_titles": ["标题一", "带  多余  空格"]},
-        "canonical_text": f"{iid} 的断言句",
+        # ⚠️ 断言句里**不放 ID**：早先写的是 f"{iid} 的断言句"，于是
+        # 「每条都印了短 ID」那条测试在 ID 标签被整个删掉之后照样全绿。
+        "canonical_text": "这 9 篇里最具区分度的词是 甲 · 乙",
         "evidence": {"doc_ids": [], "stat": None},
         "claude_md": {"section": "focus_areas"},
     }
@@ -108,21 +110,25 @@ def _corpus(iid="C1"):
     return _insight(iid, family="corpus", kind="retention",
                     payload={"total": 620, "kept": 287, "dropped_stub": 333,
                              "dropped_duplicate": 0},
-                    canonical_text=f"{iid} 读入 620 篇，留下 287 篇",
+                    canonical_text="读入 620 篇，留下 287 篇",
                     claude_md=None)
 
 
 def test_every_insight_appears_with_its_id():
-    """呈现层与操作层唯一的接缝：报告不印短 ID，用户看完回到清单找不到对应哪条。"""
+    """呈现层与操作层唯一的接缝：报告不印短 ID，用户看完回到清单找不到对应哪条。
+
+    断言盯的是**那个 ID 标签**而不是「ID 字符串出现在页面某处」——
+    后者会被断言句里碰巧出现的同名字符串喂饱。
+    """
     payload = _payload(_insight("T1"), _insight("T2"), _corpus("C1"))
     out = render_private(payload)
     for iid in ("T1", "T2", "C1"):
-        assert iid in out
+        assert f'class="id">{iid}<' in out, iid
 
 
 def test_assertive_text_is_canonical_verbatim():
-    payload = _payload(_insight("T1", canonical_text="这 29 篇里最具区分度的词是 甲 · 乙"))
-    assert "这 29 篇里最具区分度的词是 甲 · 乙" in render_private(payload)
+    payload = _payload(_insight("T1", canonical_text="这 29 篇里最具区分度的词是 丙 · 丁"))
+    assert "这 29 篇里最具区分度的词是 丙 · 丁" in render_private(payload)
 
 
 def test_script_tag_in_title_is_escaped():
@@ -261,14 +267,15 @@ def test_share_keeps_allowed_fields():
     """配对正例：把整份内容删光也能让上面那组负例全绿。"""
     out = _share(_payload(_insight("T1"), _corpus("C1")))
     assert "排版" in out and "typography" in out      # keywords
-    assert "T1" in out                                 # 短 ID
-    assert "T1 的断言句" in out                        # canonical_text
+    assert 'class="id">T1<' in out                     # 短 ID
+    assert "这 9 篇里最具区分度的词是 甲 · 乙" in out    # canonical_text
 
 
 def test_share_only_contains_checked_items():
     payload = _payload(_insight("T1"),
                        _insight("T2", payload={"keywords": ["秘密关键词"],
-                                               "doc_count": 3}))
+                                               "doc_count": 3},
+                                canonical_text="T2 的句子"))
     out = render_share(payload, {"T1": True, "T2": False})
     assert "T2" not in out
     assert "秘密关键词" not in out, "取消勾选的条目，它的关键词也不该出现"
@@ -294,8 +301,10 @@ def test_share_is_built_from_scratch_not_filtered():
 
 
 def test_share_keywords_lists_exactly_what_appears():
+    """⚠️ 探针关键词必须与默认断言句里的词不重叠——否则「它没出现」这条断言
+    会被 canonical_text 里碰巧同名的字喂饱。"""
     payload = _payload(_insight("T1"),
-                       _insight("T2", payload={"keywords": ["甲", "乙"],
+                       _insight("T2", payload={"keywords": ["戊戌", "庚辛"],
                                                "doc_count": 3}))
     selections = {"T1": True, "T2": False}
     listed = share_keywords(payload, selections)
@@ -303,7 +312,7 @@ def test_share_keywords_lists_exactly_what_appears():
     out = render_share(payload, selections)
     for kw in listed:
         assert kw in out
-    assert "甲" not in out
+    assert "戊戌" not in out
 
 
 def test_share_has_no_reference_constructs_either():
@@ -316,3 +325,70 @@ def test_share_escapes_too():
     item = _insight("T1")
     item["payload"]["keywords"] = ["<script>alert(1)</script>"]
     assert "<script>alert" not in _share(_payload(item))
+
+
+# ---------------- 「零生成式文案」这条合同的牙齿 ----------------
+
+def _visible_text(html: str) -> list[str]:
+    """页面上人能读到的文字片段（去标签、去空白）。"""
+    import re
+
+    body = html.split("<body>", 1)[1]
+    return [t for t in (s.strip() for s in re.sub(r"<[^>]+>", "\n", body).split("\n"))
+            if t]
+
+
+def _traceable(payload, *, share=False):
+    """所有**允许**出现的文字：模板常量 + 能追溯到 payload 的片段。"""
+    from kb_init.report import NEXT_STEP_HEADING, NEXT_STEP_TEXT, SHARE_DISCLOSURE
+
+    allowed = {"你的知识库", "一份知识库报告", "读入的篇数 → 留下的篇数",
+               NEXT_STEP_HEADING, NEXT_STEP_TEXT, SHARE_DISCLOSURE}
+    allowed |= {title for _, title in [("topic", "主题"), ("residual", "碎片区"),
+                                       ("corpus", "语料")]}
+    for item in payload["insights"]:
+        allowed.add(item["canonical_text"])
+        allowed.add(item["insight_id"])
+        p = item.get("payload") or {}
+        allowed |= {str(k) for k in (p.get("keywords") or [])}
+        if p.get("total") is not None and p.get("kept") is not None:
+            allowed.add(f"{p['total']} → {p['kept']}")
+        if not share and (p.get("evidence_titles") or []):
+            allowed.add("证据：" + " · ".join(
+                " ".join(str(t).split()) for t in p["evidence_titles"]))
+    return allowed
+
+
+def test_private_report_contains_no_generated_prose():
+    """报告里每一句人能读到的话，要么是模板常量，要么能追溯到 payload。
+
+    「断言句逐字出现」只证明该在的在了，证明不了**没有多出来的**——
+    一个偷偷加上「你今年最痴迷的是 X」的实现，在那条断言下照样全绿。
+    这条才是「零生成式文案」的牙齿。
+    """
+    payload = _payload(_insight("T1"), _insight("T2"),
+                       _insight("R1", family="residual", kind="fragment_zone",
+                                payload={"count": 637},
+                                canonical_text="637 篇没有形成主题"),
+                       _corpus("C1"))
+    extra = [t for t in _visible_text(render_private(payload))
+             if t not in _traceable(payload)]
+    assert extra == [], f"报告里有追溯不到来源的文字：{extra}"
+
+
+def test_share_report_contains_no_generated_prose():
+    payload = _payload(_insight("T1"), _corpus("C1"))
+    extra = [t for t in _visible_text(render_share(payload, _all_checked(payload)))
+             if t not in _traceable(payload, share=True)]
+    assert extra == [], f"分享版里有追溯不到来源的文字：{extra}"
+
+
+def test_the_no_prose_detector_actually_catches_prose():
+    """负例的配对正例：给 payload 塞一句谁也追溯不到的话，检测器必须抓住它。
+
+    否则一个「_visible_text 永远返回空列表」的实现也能让上面两条全绿。
+    """
+    payload = _payload(_insight("T1", canonical_text="你今年最痴迷的是设计史"))
+    extra = [t for t in _visible_text(render_private(payload))
+             if t not in _traceable(_payload(_insight("T1")))]
+    assert extra, "检测器没抓住一句捏造的文案"

@@ -582,3 +582,60 @@ def test_share_report_leaves_no_tmp(tmp_path):
     _write_bundle(tmp_path)
     main(["compile", str(tmp_path / "insights.md")])
     assert not (tmp_path / ".report.share.html.tmp").exists()
+
+
+def test_refusal_warns_about_the_stale_share_report(tmp_path, capsys):
+    """compile 拒绝产出时，必须提醒目录里还躺着上一次的分享版。
+
+    用户取消勾选全部 → 退 8 什么都不写 → 上一次那份还在标准路径上，
+    里面正是他刚撤掉的条目。**不删**（那是上一次的完好产物，删它撞硬不变量 #2），
+    但不能不说：分享版是专门用来发出去的，档案没有这个问题，它有。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    share = tmp_path / "report.share.html"
+    assert share.exists()
+
+    _uncheck(tmp_path, "T1")
+    capsys.readouterr()
+    assert main(["compile", str(tmp_path / "insights.md")]) == 8
+    err = capsys.readouterr().err
+    assert "上一次" in err and "report.share.html" in err
+    assert share.exists(), "不删——那是上一次成功运行的完好产物"
+
+
+def test_no_stale_warning_when_there_is_no_share_report(tmp_path, capsys):
+    """配对正例：没有旧分享版时不许瞎提醒，否则这条提示很快就没人看了。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    _uncheck(tmp_path, "T1")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 8
+    assert "上一次" not in capsys.readouterr().err
+
+
+def test_share_report_is_replaced_not_appended_on_rerun(tmp_path):
+    """重跑之后，上一次勾选留下的内容不能还在分享版里。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path, insights=[
+        _bundle_insight("T1", "topic", "topic_cluster",
+                        {"doc_count": 9, "keywords": ["独有关键词甲"],
+                         "share_of_kept": 0.03, "evidence_titles": []},
+                        {"section": "focus_areas"}),
+        _bundle_insight("T2", "topic", "topic_cluster",
+                        {"doc_count": 4, "keywords": ["独有关键词乙"],
+                         "share_of_kept": 0.01, "evidence_titles": []},
+                        {"section": "focus_areas"}),
+    ])
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    share = tmp_path / "report.share.html"
+    assert "独有关键词乙" in share.read_text(encoding="utf-8")
+
+    _uncheck(tmp_path, "T2")
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    text = share.read_text(encoding="utf-8")
+    assert "独有关键词甲" in text
+    assert "独有关键词乙" not in text, "取消勾选之后它不该还在分享版里"

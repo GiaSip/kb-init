@@ -106,20 +106,45 @@ SHARE_REPORT_NAME = "report.share.html"
 
 
 def _write_share_report(out_dir: Path, html: str) -> Path:
-    """原子写入 out_dir 根目录。不套档案那套覆盖授权，理由见调用处。"""
+    """原子写入 out_dir 根目录。不套档案那套覆盖授权，理由见调用处。
+
+    **先删旧的再写新的**：这一步是隐私要求，不是洁癖。写失败时若把上一次的
+    分享版留在标准路径上，用户以为那是最新的就发出去了——而他这次取消勾选的
+    条目还在里面。宁可没有，也不能留一份「他以为已经撤掉了」的分享版。
+
+    tmp 用随机名（`mkstemp`）：固定名会让两个并发的 compile 互删对方的临时文件，
+    有可能发布出半写的 HTML；随机名 + 原子 replace 则最差也只是「谁后写谁赢」，
+    而分享版是可重新生成的派生品，这个结果可以接受。
+    """
     import os
+    import tempfile
 
     target = out_dir / SHARE_REPORT_NAME
-    tmp = out_dir / f".{SHARE_REPORT_NAME}.tmp"
+    target.unlink(missing_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{SHARE_REPORT_NAME}.", dir=out_dir)
+    tmp = Path(tmp_name)
     try:
-        tmp.unlink(missing_ok=True)          # 顺带堵掉「预置符号链接」那条写入通道
-        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         with os.fdopen(fd, "wb") as handle:
             handle.write(html.encode("utf-8"))
         os.replace(tmp, target)
     finally:
         tmp.unlink(missing_ok=True)
     return target
+
+
+def _warn_if_stale_share_report(out_dir: Path) -> None:
+    """compile 没能产出新的分享版时，提醒用户目录里还躺着旧的那份。
+
+    **不删**：那是上一次成功运行的完好产物，删它撞「失败不许带走已完成的产物」。
+    但也不能不说：分享版是**专门用来发出去**的，而它反映的是上一次的勾选——
+    用户取消勾选之后 compile 报了错，他很可能以为「那份已经不算数了」。
+    档案没有这个问题（它给本机的 agent 读），分享版有。
+    """
+    if (out_dir / SHARE_REPORT_NAME).exists():
+        print(f"注意：{out_dir / SHARE_REPORT_NAME} 还是**上一次**生成的，"
+              f"反映的是上一次的勾选。这次没有产出新的分享版——"
+              f"发出去之前请确认它是你想要的那一版，或者先删掉它。",
+              file=sys.stderr)
 
 
 def _compile_command(md_path: str) -> int:
@@ -241,12 +266,14 @@ def _compile_command(md_path: str) -> int:
     except ArchiveEmptyError as exc:
         # 8 而不是 0：什么都没写却返回成功，脚本会以为档案在那儿。
         print(f"错误：{exc}", file=sys.stderr)
+        _warn_if_stale_share_report(md.parent)
         return 8
     except ArchiveContractError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 9
     except ArchiveOverwriteError as exc:
         print(f"错误：{exc}", file=sys.stderr)
+        _warn_if_stale_share_report(md.parent)
         return 1
     except OSError as exc:
         print(f"错误：写入失败——{exc}", file=sys.stderr)
