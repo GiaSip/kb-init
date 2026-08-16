@@ -141,12 +141,23 @@ def _evidence_line(titles) -> list[str]:
 
 
 def _card(item: dict, *, largest: int, with_evidence: bool) -> list[str]:
+    """条形**只画在主题族**，且尺度是「主题里最大的那个」。
+
+    这条是把报告真渲染出来才看见的：按全局最大值缩放时，碎片区那条（637 篇）
+    和语料那条（757 篇）把尺度吃光，10 个主题（5–29 篇）全挤成看不见的红点——
+    条形本来就是为了让主题这一节可扫读，那样等于白画。
+
+    更要紧的是**跨节比较条形长度本身就是误导**：主题的分母是「篇数」，
+    碎片区那条讲的是「没有主题的篇数」，两者不是同一把尺子。与其画两把尺子，
+    不如只在真正可比的那一节里画——数字本来就在句子里，没画的那节不缺信息。
+    """
     payload = item.get("payload") or {}
     lines = ['<div class="card">',
              f'<span class="id">{esc(str(item["insight_id"]))}</span>'
              + _chips(payload.get("keywords"))]
-    count = payload.get("doc_count", payload.get("count"))
-    if isinstance(count, (int, float)) and not isinstance(count, bool):
+    count = payload.get("doc_count")
+    if (item.get("family") == "topic"
+            and isinstance(count, (int, float)) and not isinstance(count, bool)):
         width = bar_width(count, largest)
         lines += ['<div class="track">'
                   f'<div class="fill" style="width: {width}%"></div></div>']
@@ -157,10 +168,10 @@ def _card(item: dict, *, largest: int, with_evidence: bool) -> list[str]:
     return lines
 
 
-def _largest_count(insights: list[dict]) -> int:
-    counts = [(i.get("payload") or {}).get("doc_count",
-                                           (i.get("payload") or {}).get("count"))
-              for i in insights]
+def _largest_topic_count(insights: list[dict]) -> int:
+    """条形的分母：主题里最大的那个篇数。只看主题族，见 _card 的说明。"""
+    counts = [(i.get("payload") or {}).get("doc_count") for i in insights
+              if i.get("family") == "topic"]
     numeric = [c for c in counts
                if isinstance(c, (int, float)) and not isinstance(c, bool)]
     return max(numeric) if numeric else 0
@@ -168,7 +179,7 @@ def _largest_count(insights: list[dict]) -> int:
 
 def _body(insights: list[dict], *, with_evidence: bool) -> list[str]:
     """条目顺序 = insights 数组序，节序 = FAMILY_ORDER。呈现层不重排、不筛选。"""
-    largest = _largest_count(insights)
+    largest = _largest_topic_count(insights)
     grouped = _by_family(insights)
     lines: list[str] = []
     for family, title in FAMILY_ORDER:

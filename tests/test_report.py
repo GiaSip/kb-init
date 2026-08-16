@@ -189,3 +189,35 @@ def test_bar_width_appears_only_in_style_attribute():
     import re
     for value in re.findall(r'style="([^"]*)"', out):
         assert re.fullmatch(r"width:\s*\d+\.\d%", value), value
+
+
+def test_bars_are_drawn_only_for_topics():
+    """碎片区与语料不画条形。
+
+    这条是把报告真渲染出来才发现的：按全局最大值缩放时，碎片区（637 篇）与
+    语料（757 篇）会把尺度吃光，主题（5–29 篇）全挤成看不见的红点。
+    而且跨节比较条形长度本身就是误导——两节的「篇数」不是同一把尺子。
+    """
+    import re
+
+    payload = _payload(_insight("T1"),
+                       _insight("R1", family="residual", kind="fragment_zone",
+                                payload={"count": 637, "share_of_kept": 0.84}),
+                       _corpus("C1"))
+    out = render_private(payload)
+    bars = re.findall(r'style="width: ([\d.]+)%"', out)
+    assert len(bars) == 1, f"只有主题该有条形，实际 {len(bars)} 条"
+
+
+def test_topic_bars_scale_to_the_largest_topic():
+    """尺度是主题里最大的那个：最大的主题必须满格，否则一节里没有任何区分度。"""
+    import re
+
+    payload = _payload(_insight("T1", payload={"doc_count": 29, "keywords": ["a"]}),
+                       _insight("T2", payload={"doc_count": 5, "keywords": ["b"]}),
+                       _insight("R1", family="residual", kind="fragment_zone",
+                                payload={"count": 637}))
+    bars = [float(w) for w in
+            re.findall(r'style="width: ([\d.]+)%"', render_private(payload))]
+    assert bars[0] == 100.0, "最大的主题应当满格"
+    assert bars[1] == pytest.approx(100.0 * 5 / 29, abs=0.05)
