@@ -222,13 +222,19 @@ allowlist 一次收敛。所以分享版的实现是**从零开始只放行列�
 | 模块 | 职责 | 依赖 | 不认识 |
 |---|---|---|---|
 | `report.py`（新） | HTML 转义 + 模板 + 私有/分享两种视图的渲染（纯函数：payload → str） | 无 | 写盘、CLI、索引 |
-| `claude_md.py`（改） | `publish` 扩展为同时发布档案与分享版，回执记两个哈希 | 同前 | 渲染细节 |
-| `pipeline.py`（改） | 主 run 末尾产私有版，失败吸收成 `manifest.report_status` | `report` | HTML 细节 |
-| `cli.py`（改） | 退出码 10；compile 侧打印分享版包含的关键词 | — | — |
+| `pipeline.py`（改） | `_run_report_stage`：把私有版写进 staging，失败吸收成 `report_status` | `report` | HTML 细节 |
+| `manifest.py`（改） | 落 `report_status` / `report_reason` | — | — |
+| `cli.py`（改） | 退出码 10；compile 末尾写分享版并打印它包含的关键词 | `report` | HTML 细节 |
+| `claude_md.py` | **不改**（§7.2：分享版不需要授权，不进 `publish`） | — | — |
 
-**沿用「每一层的写盘集中在一处」**：报告的 HTML 由 `report.py` 生成但**不由它写盘**——
-私有版由 `pipeline.py` 写（与索引、洞察同一条事务线），分享版由 `claude_md.py` 写
-（与档案同一次授权、同一把锁、同一份回执）。让渲染器碰磁盘，就会出现第二套原子性实现。
+**沿用「每一层的写盘集中在一处」**：`report.py` 只生成字符串、**不碰磁盘**——
+让渲染器写盘就会出现第二套原子性实现。私有版由 `pipeline.py` 写进 staging
+（与索引、洞察同一条事务线，随 rename 一次发布）；分享版由 `cli.py` 在 compile 末尾
+原子写入 `out_dir` 根目录。
+
+> ⚠️ 分享版**不进 `claude_md.publish`**。初稿写的是「与档案同一次授权、同一把锁、
+> 同一份回执」，那会为了一个不存在的碰撞面（§7.2）把 2D 已经审了七轮的事务改宽，
+> 并逼出「一个文件有主一个没主」这个本来不必回答的问题。
 
 ## 9. 明确不做
 
