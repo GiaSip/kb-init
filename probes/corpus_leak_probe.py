@@ -68,6 +68,9 @@ _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{4,}")
 # 代价是噪音变多，而噪音由人扫一眼解决，漏报没人解决。
 _CJK_WINDOW = 4
 _CJK = re.compile(r"[\u4e00-\u9fff]")
+# 「词字符连续段」：中英数混排的术语（形如字母 + 汉字连写）既不是空白分词的产物，
+# 连续汉字段又常常不够长，两条路都覆盖不到它——而这类词恰恰最独特。
+_WORDRUN = re.compile(r"\w+", re.UNICODE)
 
 
 # 两端都要剥：只剥右侧的话，`(Falcon)` 会变成 `(Falcon`，而仓库里那个裸的
@@ -93,6 +96,11 @@ def _fragments(text: str) -> set[str]:
         host = _trim(host)
         if len(host) >= MIN_LEN:
             out.add(host)
+    # **只收含汉字的混排段**。不加这个限制的话，`\w+` 会把 URL 碎片（https、
+    # cloud）和标题里的普通英文词全放进来——实测真命中 5 条、噪音 9 条，
+    # 而「全是噪音时人会直接忽略它」正是这个脚本开头写着的失效模式。
+    # 纯拉丁的段落本来就由空白分词那条路覆盖，这里补的只是它覆盖不到的混排词。
+    out.update(w for w in _WORDRUN.findall(text) if _CJK.search(w))
     for run in _CJK_RUN.findall(text):
         out.add(run)
         # 长段要切**逐字滑窗**，不是不重叠地跳着切：仓库里引用的常常只是半句，
