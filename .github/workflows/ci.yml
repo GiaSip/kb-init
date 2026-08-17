@@ -1,0 +1,50 @@
+# 平台矩阵按**实测的**支持面写，不按当初的设想写。
+#
+# DESIGN R15 原文要求验「Windows x64 / macOS Intel + Apple Silicon / Linux x64」，
+# 但 onnxruntime 至少从 1.18 起就不再发 macOS x86_64 wheel（逐版本查过 PyPI），
+# 所以 macOS Intel 不是「还没验」而是**装不上**——在这里放一个 macos-13 runner
+# 只会得到一个永远红的格子，然后被人加 continue-on-error 忽略掉，
+# 那正是「留一条兜底路径，规则就被它绕过」的开始。
+#
+# 依据见 docs/superpowers/specs/2026-08-17-distribution-surface-design.md §2.2。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]   # macos-14 = Apple Silicon
+        python: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: 安装（含开发依赖）
+        run: uv sync --python ${{ matrix.python }}
+      # 单元测试绝不下载模型（硬不变量 #5），smoke 标记默认就被 addopts 排除，
+      # 所以这一步在 CI 上不联网也应当全绿。它同时是那条不变量的活体检查：
+      # 哪天有人在单测里真去下模型，这里会因为超时或网络失败暴露出来。
+      - name: 跑测试
+        run: uv run pytest -q
+
+  package:
+    # 装的是**打出来的 wheel**，不是源码目录——开发环境里能跑，证明不了
+    # 打包产物能跑：`[tool.hatch.build.targets.wheel]` 少配一处，装出来就是空的，
+    # 而开发环境完全看不出。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv build
+      - name: 在全新环境里装 wheel 并验入口点
+        run: |
+          uv venv --python 3.12 /tmp/smoke
+          uv pip install --python /tmp/smoke/bin/python dist/*.whl
+          /tmp/smoke/bin/kb-init --version
+          /tmp/smoke/bin/kb-init --help

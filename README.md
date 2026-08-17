@@ -2,6 +2,19 @@
 
 把你攒了几年、自己都没再打开过的笔记导出，编译成一份干净的、你的 AI agent 能直接用的知识库。
 
+## 支持的平台
+
+| 平台 | 状态 |
+|---|---|
+| Windows x64 / arm64 | ✅ |
+| Linux x64 / aarch64 | ✅ 需要 glibc ≥ 2.28（Ubuntu 20.04+、Debian 10+、RHEL 8+） |
+| macOS Apple Silicon | ✅ 需要 macOS ≥ 14 |
+| **macOS Intel** | ❌ **不支持** |
+
+macOS Intel 这一条不是我们偷懒：向量推理依赖 `onnxruntime`，而它已经不再发布
+macOS x86_64 的预编译包（逐版本查过，至少从 1.18 起就没有了）。在 Intel Mac 上装它
+会退化成从源码编译并失败——与其让你花二十分钟撞上一堵墙，不如现在说清楚。
+
 ## 安装与运行
 
 需要先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)。装好 uv 后一条命令运行，**无需自己安装 Python**：
@@ -10,7 +23,9 @@
 uvx kb-init ~/Downloads/notion-export -o my-kb
 ```
 
-> 首次运行会下载 Python 与依赖，可能需要几分钟。这不是「零安装」，是「零项目安装」。
+> 首次运行会下载 Python、依赖与一个约 90MB 的向量模型，按分钟计。这不是「零安装」，
+> 是「零项目安装」。索引阶段会一直告诉你它在干什么（进度走 stderr，
+> 所以 `kb-init … | 管道` 不受影响）；不会给你一个假的剩余时间——我们估不准。
 
 ## 它做了什么
 
