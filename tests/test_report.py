@@ -156,9 +156,11 @@ def test_canonical_text_is_escaped_too():
 def test_bare_url_in_title_is_not_linkified():
     """真实语料的证据标题里就含裸 URL。它必须是纯文本，不能被自动变成链接。"""
     item = _insight("T1")
+    # ⚠️ 用 example.com，不用真实语料里那条 URL。测试 fixture 也是仓库内容，
+    # 而这个仓库要开源——从真实笔记里抄一条 URL 进来，就是把用户的数据发出去了。
     item["payload"]["evidence_titles"] = ["https://example.com/p/abc123"]
     out = render_private(_payload(item))
-    assert "example.com" in out
+    assert "example.com/p/abc123" in out
     assert "href=" not in out
 
 

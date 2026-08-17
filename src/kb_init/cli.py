@@ -355,11 +355,16 @@ def main(argv: list[str] | None = None) -> int:
 
     from kb_init.extract import UnsafeArchiveError
     from kb_init.pipeline import run
+    from kb_init.progress import ProgressPrinter
 
     # 退出码合同（见 README）：0 成功 / 1 输出冲突 / 2 用法错误
     # / 3 输入不安全或损坏 / 4 I-O 失败 / 5 产物已发布但索引未完成
     # / 6 索引完成但洞察层未生成 / 7 validate 判定 insights.md 不合法。
     # 默认不向普通用户吐 traceback。
+    # 索引阶段冷启动要下载约 90MB 模型、按分钟计。在这之前用户看到的是一片空白，
+    # 而一个盯着空白终端的人会以为它挂了然后 Ctrl-C——这个工具在他那里的
+    # 唯一一次机会就没了（DESIGN R14）。
+    progress = None if args.no_index else ProgressPrinter()
     try:
         counts = run(
             args.source,
@@ -367,6 +372,7 @@ def main(argv: list[str] | None = None) -> int:
             wikilinks=args.wikilinks,
             no_index=args.no_index,
             corpus_provenance=args.corpus_provenance.replace("-", "_"),
+            progress=progress,
         )
     except FileExistsError as exc:
         print(f"错误：{exc}", file=sys.stderr)
