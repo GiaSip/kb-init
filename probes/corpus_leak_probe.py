@@ -66,7 +66,10 @@ def _fragments(text: str) -> set[str]:
     for url in _URL.findall(text):
         out.add(url)
         # 也单独放主机名：实际漏出去的那次，仓库里留的就是 URL 的一部分。
-        host = url.split("//", 1)[-1].split("/", 1)[0]
+        # 主机名要按 / ? # 一起切，并剥掉尾随标点：`https://host?q=1` 只按 "/"
+        # 切会得到 `host?q=1`，那个串在仓库里永远查不到——**漏报**。
+        host = re.split(r"[/?#]", url.split("//", 1)[-1], maxsplit=1)[0]
+        host = host.strip(".,;:!)]}\"'")
         if len(host) >= MIN_LEN:
             out.add(host)
     out.update(_CJK_RUN.findall(text))
@@ -99,8 +102,15 @@ def hits(needle: str) -> list[str]:
         # 于是这个词永远查不出命中——而漏报正是这个脚本要防的东西。
         # `-i` 是因为大小写变体照样是泄露。
         (["git", "grep", "-l", "-i", "-F", "-e", needle, "--"], "工作树"),
-        (["git", "log", "--all", "--oneline", "--regexp-ignore-case",
-          f"-S{needle}"], "历史"),
+        # 暂存区单独查一遍：内容已 `git add`、工作树又被清干净时，
+        # 只查工作树会报「干净」，然后它跟着下一次提交进历史。
+        (["git", "grep", "-l", "-i", "-F", "--cached", "-e", needle, "--"], "暂存区"),
+        # ⚠️ `-i` / `--regexp-ignore-case` **对 `-S` 不生效**——它只作用于
+        # `--grep` 那类正则匹配。要让 pickaxe 忽略大小写，必须同时给
+        # `--pickaxe-regex`，并把探针词按正则转义（否则 `.` `?` 会被当元字符，
+        # 那又是另一种漏报）。
+        (["git", "log", "--all", "--oneline", "-i", "--pickaxe-regex",
+          f"-S{re.escape(needle)}"], "历史"),
     ):
         result = subprocess.run(args, cwd=REPO, capture_output=True, text=True)
         # git grep / git log 的 1 是「没找到」，其余非零是真错误。
