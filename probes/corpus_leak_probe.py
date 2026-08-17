@@ -86,7 +86,12 @@ def _fragments(text: str) -> set[str]:
     out = {text} if len(text) >= MIN_LEN else set()
     # 按空白切出来的词常带着附着标点（`Falcon,`）。拿它原样去查，
     # 仓库里那个不带逗号的 `Falcon` 就永远查不到——**假绿**。
-    out.update(w for w in map(_trim, text.split()) if len(w) >= MIN_LEN)
+    for word in map(_trim, text.split()):
+        out.add(word)
+        # 意语的省音写法（撇号连写）只按空白切的话，只会得到整体，
+        # 而仓库里摘的往往是撇号后面那个实词。按撇号再拆一次，增量小、噪音低。
+        if "'" in word or "\u2019" in word:
+            out.update(_trim(part) for part in re.split(r"['\u2019]", word))
     for url in _URL.findall(text):
         out.add(url)
         # 也单独放主机名：实际漏出去的那次，仓库里留的就是 URL 的一部分。
@@ -171,7 +176,11 @@ def _scan(needle: str) -> list[tuple[str, str]]:
         # `-e` 与 `--` 都不是可选的：以 `-` 开头的探针词否则会被 git 当成选项，
         # 于是这个词永远查不出命中——而漏报正是这个脚本要防的东西。
         # `-i` 是因为大小写变体照样是泄露。
-        (["git", "grep", "-l", "-i", "-F", "-e", needle, "--"], "工作树"),
+        # `--untracked` 不是可有可无：刚写完还没 `git add` 的文件，
+        # `git grep` 默认根本不看——而"我刚在测试里贴了段真实内容"正是最常见的
+        # 那一刻。少这一个开关，这个脚本在最该报警的时候会说干净。
+        (["git", "grep", "-l", "-i", "-F", "--untracked", "-e", needle, "--"],
+         "工作树"),
         # 暂存区单独查一遍：内容已 `git add`、工作树又被清干净时，
         # 只查工作树会报「干净」，然后它跟着下一次提交进历史。
         (["git", "grep", "-l", "-i", "-F", "--cached", "-e", needle, "--"], "暂存区"),
