@@ -271,7 +271,9 @@ def check_archive_name(name: str) -> str:
     if ":" in name:
         # `x.md:stream` 是 NTFS 的备用数据流，内容会写进一个看不见的地方
         raise UnsafeArchiveName(f"文件名不能含冒号：{name!r}")
-    if PurePath(name).stem.upper() in _WIN_DEVICE_NAMES:
+    # Windows 认的是**第一个点之前**那一段，不是 PurePath.stem——
+    # `CON.tar.gz` 的 stem 是 `CON.tar`，照 stem 判会整个绕过去。
+    if name.split(".")[0].upper() in _WIN_DEVICE_NAMES:
         raise UnsafeArchiveName(
             f"{name!r} 是 Windows 的保留设备名，写它等于往设备里写。")
     return name
@@ -321,20 +323,31 @@ def _read_receipt(out_dir) -> dict | None:
     return receipt if isinstance(receipt, dict) else None
 
 
-def _write_exclusive(path, data: bytes) -> None:
-    """先 unlink 再 O_EXCL 建，绝不写进一个已经存在的路径。
+def _write_temp(directory, prefix: str, data: bytes):
+    """在 `directory` 里用**随机名**建一个临时文件并写满，返回它的路径。
 
-    直接 `write_bytes` 会**跟随符号链接**：谁在 knowledge/ 里预置一个
-    `.CLAUDE.md.tmp` 符号链接，我们就替他写坏了链接指向的文件。
-    `unlink` 删的是链接本身而不是它指向的东西，所以这两步合起来既清掉了
-    上次崩溃留下的残骸，也堵掉了这条写入通道。
+    早先用的是固定名（`.CLAUDE.md.tmp`）加「先 unlink 再 O_EXCL 建」。
+    unlink 那一步是为了堵掉「预置符号链接」的写入通道，但它同时会**无条件删掉
+    那个路径上原有的东西**——而档案名现在是用户给的：先用
+    `--agent-file .AGENTS.md.tmp` 生成一份，再用 `--agent-file AGENTS.md` 跑一次，
+    前一份就被静默删了。
+
+    `mkstemp` 一次解决两件事：名字随机（撞不上用户的文件，也没法被预置符号链接
+    埋伏），且它自己就是 O_EXCL 创建。
     """
     import os
+    import tempfile
+    from pathlib import Path
 
-    path.unlink(missing_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=directory)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp
 
 
 def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str],
@@ -355,10 +368,10 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str],
         "archive_sha256": digest,
         "insight_ids": list(insight_ids),
     }
-    tmp = out_dir / f".{RECEIPT_NAME}.tmp"
+    tmp = _write_temp(out_dir, f".{RECEIPT_NAME}.",
+                      _encode(json.dumps(receipt, ensure_ascii=False, indent=2),
+                              "回执"))
     try:
-        _write_exclusive(tmp, _encode(json.dumps(receipt, ensure_ascii=False,
-                                                 indent=2), "回执"))
         os.replace(tmp, out_dir / RECEIPT_NAME)
     finally:
         # replace 失败时 tmp 会留下；下次运行虽然会先 unlink 它，但一个
@@ -480,7 +493,7 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
             f"确认没有之后，删掉这个锁文件再重跑。") from exc
 
     target = archive_dir / archive_name
-    tmp = archive_dir / f".{archive_name}.tmp"
+    tmp = None
     try:
         # os.close 放进 try：它抛异常的概率极低，但放在外面就意味着
         # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
@@ -489,14 +502,14 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
         data = _encode(text, "档案正文")
         try:
             # 写 tmp 放进这个 try：写到一半失败（磁盘满、被打断）同样会
-            # 留下半份 .tmp，而残骸会让下一个人误判发生过什么。
+            # 留下半份临时文件，而残骸会让下一个人误判发生过什么。
             #
             # ⚠️ 顺序：**tmp 先写满，再作废回执，最后一步换文件。**
             # 上一版把「作废回执」放在写 tmp 之前，于是磁盘满这种常见故障会留下
             # {旧档案完好, 回执没了} —— 下次 compile 会以「没有回执」拒绝覆盖，
             # 并要求用户删掉一份**完好的、我们自己写的**档案。修一个撒谎的回执，
             # 修出了一个冤枉用户的诊断。
-            _write_exclusive(tmp, data)
+            tmp = _write_temp(archive_dir, f".{archive_name}.", data)
             # 作废旧回执。**不变量：回执存在 ⇒ 它描述的就是盘上那份档案。**
             # 不作废的话，「档案换成新的、回执写失败」会留下一份记着旧哈希的
             # 回执——它会（错误地）指控用户手改过档案，而其实是我们换的。
@@ -508,7 +521,8 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
                 # 不留窗口，别的进程抢先建了就会抛而不是被我们覆盖。
                 os.link(tmp, target)
         finally:
-            tmp.unlink(missing_ok=True)
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
         _write_receipt(out_dir, payload, _sha256(data), insight_ids,
                        archive_name=archive_name)
     finally:

@@ -364,6 +364,16 @@ def main(argv: list[str] | None = None) -> int:
         # 这个提醒只在那个文件真的存在时才会打印，所以不会误伤无关目录。
         _warn_if_stale_share_report(Path(argv[1]).parent)
         return 7
+    if (len(argv) >= 2 and argv[0] in subcommands
+            and not argv[1].startswith("-") and Path(argv[1]).is_dir()):
+        # 给的是目录。报「用法错误」会让人去检查命令怎么写，而命令是对的，
+        # 错的是指了个目录——诊断该把人指向那个目录里的 insights.md。
+        guess = Path(argv[1]) / "insights.md"
+        hint = f"你要的多半是 {guess}" if guess.is_file() else \
+            f"{argv[1]} 里没有 insights.md"
+        print(f"错误：kb-init {argv[0]} 要的是 insights.md 文件，"
+              f"不是目录 {argv[1]}。{hint}", file=sys.stderr)
+        return 2
     if argv and argv[0] in subcommands and not Path(argv[0]).exists():
         print(f"用法：kb-init {argv[0]} <insights.md>", file=sys.stderr)
         return 2

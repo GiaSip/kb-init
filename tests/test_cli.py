@@ -851,3 +851,38 @@ def test_missing_path_with_options_still_says_not_found(tmp_path, capsys):
 
     assert main(["compile", str(tmp_path / "没有.md"), "--agent-file", "A.md"]) == 7
     assert "找不到" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", ["CON.tar.gz", "COM1.a.b", "nul.x.y"])
+def test_windows_device_names_with_multiple_suffixes(tmp_path, bad):
+    """Windows 认第一个点之前那一段——按 PurePath.stem 判会整个绕过去。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", bad]) == 2
+
+
+def test_compile_does_not_delete_a_file_that_looks_like_our_temp(tmp_path):
+    """档案名是用户给的：先用 --agent-file .AGENTS.md.tmp 生成一份，
+    再用 --agent-file AGENTS.md 跑一次，固定临时名会把前一份静默删掉。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    victim = tmp_path / "knowledge" / ".AGENTS.md.tmp"
+    victim.write_text("我自己的文件", encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "AGENTS.md"]) == 0
+    assert victim.exists() and victim.read_text(encoding="utf-8") == "我自己的文件"
+
+
+@pytest.mark.parametrize("cmd", ["compile", "validate"])
+def test_directory_argument_points_at_insights_md(tmp_path, cmd, capsys):
+    """给的是目录时，诊断要把人指向那个目录里的 insights.md，
+    而不是让他去检查命令怎么写——命令是对的。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main([cmd, str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "insights.md" in err and "目录" in err
