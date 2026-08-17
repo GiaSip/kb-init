@@ -58,11 +58,12 @@ _URL = re.compile(r"https?://[^\s\u3000）)】」』，。；]+")
 # 而真实泄露往往是**片段**（引用半句、抄一个词组）。按标点切出连续 CJK 段，
 # 每段本身就足够独特。漏报比误报危险得多，这里刻意偏向多产生候选。
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{5,}")
+_CJK_WINDOW = 6
 
 
 # 两端都要剥：只剥右侧的话，`(Falcon)` 会变成 `(Falcon`，而仓库里那个裸的
 # `Falcon` 照样查不到——**假绿**。弯引号同理，它们在中文文案里比直引号常见。
-_EDGE_PUNCT = ".,;:!?()[]{}\"'“”‘’（）【】「」『』，。；：！？·、…-—~`*_"
+_EDGE_PUNCT = ".,;:!?()[]{}<>\"'“”‘’（）【】「」『』，。；：！？·、…-—~`*_/\\"
 
 
 def _trim(word: str) -> str:
@@ -83,7 +84,14 @@ def _fragments(text: str) -> set[str]:
         host = _trim(host)
         if len(host) >= MIN_LEN:
             out.add(host)
-    out.update(_CJK_RUN.findall(text))
+    for run in _CJK_RUN.findall(text):
+        out.add(run)
+        # 长段还要切窗：仓库里引用的常常只是半句。整段进不了命中，
+        # 而半句才是真实的引用方式——这条不补就是一条稳定的假绿路径。
+        # 窗口不重叠地走，控制候选数量：这是个人工检查工具，
+        # 探针爆炸到没人看，与漏报是同一个结果。
+        for i in range(0, len(run) - _CJK_WINDOW + 1, _CJK_WINDOW):
+            out.add(run[i:i + _CJK_WINDOW])
     return out
 
 
@@ -121,7 +129,15 @@ def hits(needle: str) -> list[str]:
         # `--pickaxe-regex`，并把探针词按正则转义（否则 `.` `?` 会被当元字符，
         # 那又是另一种漏报）。
         (["git", "log", "--all", "--oneline", "-i", "--pickaxe-regex",
-          f"-S{re.escape(needle)}"], "历史"),
+          f"-S{re.escape(needle)}"], "历史(diff)"),
+        # commit message 也是仓库内容，而且**会被 GitHub 全文索引**。
+        # `-S` 只看文件差异，看不见提交信息——这一条不查，把真实标题写进
+        # commit message 的那种泄露就永远报干净。
+        # ⚠️ 这里用 `-F` 而不是 re.escape：`--grep` 走的是 **git 自己的**正则，
+        # Python 的转义风格喂进去会因为括号不配对直接 exit 128
+        # （实测撞到过；当时没有默默报干净，是因为上一轮加了返回码检查）。
+        (["git", "log", "--all", "--oneline", "-i", "-F",
+          f"--grep={needle}"], "历史(commit message)"),
     ):
         result = subprocess.run(args, cwd=REPO, capture_output=True, text=True)
         # git grep / git log 的 1 是「没找到」，其余非零是真错误。
