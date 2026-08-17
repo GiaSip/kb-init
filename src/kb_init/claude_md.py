@@ -238,7 +238,53 @@ def render_archive(payload: dict, grouped: Grouped) -> str:
 RECEIPT_NAME = "compile.json"
 LOCK_NAME = ".kb-init-compile.lock"
 ARCHIVE_DIR = "knowledge"
+# 默认仍是 CLAUDE.md，但**不再写死**：Codex 读 AGENTS.md、Gemini 读 GEMINI.md，
+# 产出一个对方不读的文件等于没产出。而这个工具选独立 CLI 的理由本来就是
+# 「谁都可以用」（DESIGN §7）。
 ARCHIVE_NAME = "CLAUDE.md"
+
+
+class UnsafeArchiveName(ValueError):
+    """`--agent-file` 的值要拼进路径，所以它是一条真实的路径穿越面。"""
+
+
+def check_archive_name(name: str) -> str:
+    """只接受**裸文件名**。
+
+    `../../x.md` 会把档案写到 knowledge/ 外面去，而这个值直接来自命令行。
+    这个工具对输入本来就不预设善意（DESIGN R13 已为 zip 立过同一条规矩），
+    命令行参数没有理由例外。
+    """
+    from pathlib import PurePath
+
+    if (not name or name in (".", "..") or "/" in name or "\\" in name
+            or PurePath(name).name != name):
+        raise UnsafeArchiveName(
+            f"--agent-file 只接受一个文件名（比如 AGENTS.md），不接受路径：{name!r}。"
+            f"档案只会写进输出目录的 knowledge/ 里。")
+    # 以下三类在 Windows 上会**别名到另一个目录项**——写进去的和回执里记的
+    # 不是同一个东西，而这个工具声称支持 Windows。
+    if name != name.rstrip(". "):
+        # `AGENTS.md.` 与 `AGENTS.md ` 在 Win32 上都指向 `AGENTS.md`
+        raise UnsafeArchiveName(
+            f"文件名不能以点或空格结尾（在 Windows 上它会指向另一个文件）：{name!r}")
+    if ":" in name:
+        # `x.md:stream` 是 NTFS 的备用数据流，内容会写进一个看不见的地方
+        raise UnsafeArchiveName(f"文件名不能含冒号：{name!r}")
+    # Windows 认的是**第一个点之前**那一段，不是 PurePath.stem——
+    # `CON.tar.gz` 的 stem 是 `CON.tar`，照 stem 判会整个绕过去。
+    if name.split(".")[0].upper() in _WIN_DEVICE_NAMES:
+        raise UnsafeArchiveName(
+            f"{name!r} 是 Windows 的保留设备名，写它等于往设备里写。")
+    return name
+
+
+# Windows 保留设备名。它们不带扩展名也算（`CON.md` 同样是设备）。
+_WIN_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
 RECEIPT_SCHEMA_VERSION = "0.1"
 
 
@@ -277,23 +323,35 @@ def _read_receipt(out_dir) -> dict | None:
     return receipt if isinstance(receipt, dict) else None
 
 
-def _write_exclusive(path, data: bytes) -> None:
-    """先 unlink 再 O_EXCL 建，绝不写进一个已经存在的路径。
+def _write_temp(directory, prefix: str, data: bytes):
+    """在 `directory` 里用**随机名**建一个临时文件并写满，返回它的路径。
 
-    直接 `write_bytes` 会**跟随符号链接**：谁在 knowledge/ 里预置一个
-    `.CLAUDE.md.tmp` 符号链接，我们就替他写坏了链接指向的文件。
-    `unlink` 删的是链接本身而不是它指向的东西，所以这两步合起来既清掉了
-    上次崩溃留下的残骸，也堵掉了这条写入通道。
+    早先用的是固定名（`.CLAUDE.md.tmp`）加「先 unlink 再 O_EXCL 建」。
+    unlink 那一步是为了堵掉「预置符号链接」的写入通道，但它同时会**无条件删掉
+    那个路径上原有的东西**——而档案名现在是用户给的：先用
+    `--agent-file .AGENTS.md.tmp` 生成一份，再用 `--agent-file AGENTS.md` 跑一次，
+    前一份就被静默删了。
+
+    `mkstemp` 一次解决两件事：名字随机（撞不上用户的文件，也没法被预置符号链接
+    埋伏），且它自己就是 O_EXCL 创建。
     """
     import os
+    import tempfile
+    from pathlib import Path
 
-    path.unlink(missing_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    fd, name = tempfile.mkstemp(prefix=prefix, dir=directory)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp
 
 
-def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) -> None:
+def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str],
+                   archive_name: str = ARCHIVE_NAME) -> None:
     import json
     import os
 
@@ -304,14 +362,16 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) 
         "run_id": payload["run_id"],
         "corpus_hash": payload["corpus_hash"],
         "tool_version": __version__,
-        "archive_path": f"{ARCHIVE_DIR}/{ARCHIVE_NAME}",
+        # 回执说的必须是盘上那份的名字。永远写 CLAUDE.md 的话，
+        # 换了 --agent-file 之后回执就在描述一个不存在的文件——回执也是产物。
+        "archive_path": f"{ARCHIVE_DIR}/{archive_name}",
         "archive_sha256": digest,
         "insight_ids": list(insight_ids),
     }
-    tmp = out_dir / f".{RECEIPT_NAME}.tmp"
+    tmp = _write_temp(out_dir, f".{RECEIPT_NAME}.",
+                      _encode(json.dumps(receipt, ensure_ascii=False, indent=2),
+                              "回执"))
     try:
-        _write_exclusive(tmp, _encode(json.dumps(receipt, ensure_ascii=False,
-                                                 indent=2), "回执"))
         os.replace(tmp, out_dir / RECEIPT_NAME)
     finally:
         # replace 失败时 tmp 会留下；下次运行虽然会先 unlink 它，但一个
@@ -319,7 +379,7 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) 
         tmp.unlink(missing_ok=True)
 
 
-def _authorize(target, out_dir, payload: dict) -> None:
+def _authorize(target, out_dir, payload: dict, archive_name: str) -> bool:
     """三条全满足才允许替换：回执在且 run_id 一致 / 现存文件哈希等于回执所记 /
     目标不是符号链接。
 
@@ -330,7 +390,7 @@ def _authorize(target, out_dir, payload: dict) -> None:
             f"{target} 是一个符号链接。绝不跟随符号链接写——那能把任意路径"
             f"变成写入目标。删掉它再重跑。")
     if not target.exists():
-        return
+        return False
 
     receipt = _read_receipt(out_dir)
     if receipt is None:
@@ -356,6 +416,15 @@ def _authorize(target, out_dir, payload: dict) -> None:
         raise ArchiveOverwriteError(
             f"{target} 已经存在，但 {out_dir / RECEIPT_NAME} 里没有本工具写过它的"
             f"记录——它可能是你自己的一篇笔记。拒绝覆盖。确认不要之后删掉它再重跑。")
+    expected_path = f"{ARCHIVE_DIR}/{archive_name}"
+    if receipt.get("archive_path") != expected_path:
+        # 回执描述的是**另一个**档案文件。换过 --agent-file 之后两份档案内容
+        # 常常一模一样，哈希也就一样——只比哈希的话，B 的回执会授权覆盖 A，
+        # 而「回执存在 ⇒ 它描述的就是盘上那份」这条不变量当场失效。
+        raise ArchiveOverwriteError(
+            f"{out_dir / RECEIPT_NAME} 记的是 {receipt.get('archive_path')!r}，"
+            f"不是 {expected_path!r}——这份回执不能为它授权。"
+            f"确认 {target} 不要了之后删掉它再重跑。")
     if receipt.get("run_id") != payload["run_id"]:
         raise ArchiveOverwriteError(
             f"{target} 是另一次运行（{receipt.get('run_id')}）写下的，"
@@ -368,6 +437,7 @@ def _authorize(target, out_dir, payload: dict) -> None:
         raise ArchiveOverwriteError(
             f"{target} 自上次生成之后被改动过。那是你的编辑，不该被无声抹掉——"
             f"拒绝覆盖。想重新生成就先删掉它。")
+    return True
 
 
 def check_archive_dir(out_dir) -> None:
@@ -394,7 +464,8 @@ def check_archive_dir(out_dir) -> None:
             f"而这个目录本该由上一步生成——请确认 -o 指的是完整的输出目录。")
 
 
-def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
+def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
+            archive_name: str = ARCHIVE_NAME):
     """授权 → 原子写档案 → 写回执。返回档案路径。
 
     顺序是「先档案后回执」：两个文件做不到共同原子，就把失败留在信息量最小的
@@ -405,6 +476,10 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
     from pathlib import Path
 
     out_dir = Path(out_dir)
+    # 名字先验：放在取锁之后校验的话，任何一个非法名字都会留下一把锁，
+    # 下次运行会被告知「另一个 compile 正在运行」——一个参数错误变成了
+    # 一个需要人去删文件才能解开的死结。
+    archive_name = check_archive_name(archive_name)
     check_archive_dir(out_dir)
     archive_dir = out_dir / ARCHIVE_DIR
 
@@ -418,37 +493,42 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
             f"另一个 compile 正在这个目录里运行（锁文件 {lock}）。"
             f"确认没有之后，删掉这个锁文件再重跑。") from exc
 
-    target = archive_dir / ARCHIVE_NAME
-    tmp = archive_dir / f".{ARCHIVE_NAME}.tmp"
+    target = archive_dir / archive_name
+    tmp = None
     try:
         # os.close 放进 try：它抛异常的概率极低，但放在外面就意味着
         # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
         os.close(fd)
-        _authorize(target, out_dir, payload)
+        replacing = _authorize(target, out_dir, payload, archive_name)
         data = _encode(text, "档案正文")
         try:
             # 写 tmp 放进这个 try：写到一半失败（磁盘满、被打断）同样会
-            # 留下半份 .tmp，而残骸会让下一个人误判发生过什么。
+            # 留下半份临时文件，而残骸会让下一个人误判发生过什么。
             #
             # ⚠️ 顺序：**tmp 先写满，再作废回执，最后一步换文件。**
             # 上一版把「作废回执」放在写 tmp 之前，于是磁盘满这种常见故障会留下
             # {旧档案完好, 回执没了} —— 下次 compile 会以「没有回执」拒绝覆盖，
             # 并要求用户删掉一份**完好的、我们自己写的**档案。修一个撒谎的回执，
             # 修出了一个冤枉用户的诊断。
-            _write_exclusive(tmp, data)
+            tmp = _write_temp(archive_dir, f".{archive_name}.", data)
             # 作废旧回执。**不变量：回执存在 ⇒ 它描述的就是盘上那份档案。**
             # 不作废的话，「档案换成新的、回执写失败」会留下一份记着旧哈希的
             # 回执——它会（错误地）指控用户手改过档案，而其实是我们换的。
             (out_dir / RECEIPT_NAME).unlink(missing_ok=True)
-            if target.exists():
+            # 走哪条路**由授权那一刻决定**，不在这里重新问一次 `exists()`。
+            # 重新问的话，授权时不存在、这中间被别人建出来的文件会落进
+            # `os.replace` 分支被静默覆盖——而我们从没为它拿到过授权。
+            if replacing:
                 os.replace(tmp, target)
             else:
-                # 新建走 link：原子且独占——「检查时不存在」与「创建」之间
-                # 不留窗口，别的进程抢先建了就会抛而不是被我们覆盖。
+                # 新建走 link：原子且独占——别的进程抢先建了就会抛，
+                # 而不是被我们覆盖。
                 os.link(tmp, target)
         finally:
-            tmp.unlink(missing_ok=True)
-        _write_receipt(out_dir, payload, _sha256(data), insight_ids)
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+        _write_receipt(out_dir, payload, _sha256(data), insight_ids,
+                       archive_name=archive_name)
     finally:
         lock.unlink(missing_ok=True)
     return target

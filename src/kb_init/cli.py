@@ -4,6 +4,7 @@ import zipfile
 from pathlib import Path
 
 from kb_init import __version__
+from kb_init.claude_md import ARCHIVE_NAME
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -73,7 +74,7 @@ def _locate_bundle(md: Path) -> dict:
     return {"json_path": json_path, "manifest": manifest}
 
 
-def _validate_command(md_path: str) -> int:
+def _validate_command(md_path: str, rest: list[str] | None = None) -> int:
     """`kb-init validate <insights.md>`：独立校验勾选清单与它的 json 真源。
 
     退出码 7 而不是复用 6：6 是「这次运行的洞察没生成」，7 是「你手上这份清单
@@ -83,6 +84,11 @@ def _validate_command(md_path: str) -> int:
 
     from kb_init.insights_md import InsightsValidationError, validate_markdown
 
+    if rest:
+        # validate 没有选项。跟着 compile 一起放松会让「用法错误」这条诊断失效。
+        print(f"用法：kb-init validate <insights.md>（不接受其他参数：{rest}）",
+              file=sys.stderr)
+        return 2
     md = Path(md_path)
     try:
         bundle = _locate_bundle(md)
@@ -147,20 +153,30 @@ def _warn_if_stale_share_report(out_dir: Path) -> None:
               file=sys.stderr)
 
 
-def _compile_command(md_path: str) -> int:
+def _compile_command(md_path: str, rest: list[str] | None = None) -> int:
     """把 `_compile` 包起来，**在唯一的出口**统一提醒旧分享版。
 
     早先只在退出码 8 / 1 两处提醒，而 4 / 7 / 9 同样会留下上一次的分享版——
     提醒漏了一半等于没提醒：用户偏偏会在报错那次以为「这次没生成，那份还是旧的吧」，
     也偏偏可能不这么想。放在唯一出口才不会漏。
     """
-    code = _compile(md_path)
+    import argparse as _argparse
+
+    sub = _argparse.ArgumentParser(prog="kb-init compile", add_help=False)
+    sub.add_argument("--agent-file", default=ARCHIVE_NAME,
+                     help="档案文件名（默认 CLAUDE.md）。Codex 用 AGENTS.md，"
+                          "Gemini 用 GEMINI.md")
+    try:
+        opts = sub.parse_args(rest or [])
+    except SystemExit:
+        return 2
+    code = _compile(md_path, agent_file=opts.agent_file)
     if code != 0:
         _warn_if_stale_share_report(Path(md_path).parent)
     return code
 
 
-def _compile(md_path: str) -> int:
+def _compile(md_path: str, agent_file: str = ARCHIVE_NAME) -> int:
     """`kb-init compile <insights.md>`：把勾选过的洞察编译成知识库的 CLAUDE.md。
 
     gate 顺序不是随便排的（2D spec §5）：**版本与身份 gate 必须早于
@@ -176,6 +192,7 @@ def _compile(md_path: str) -> int:
         ArchiveContractError,
         ArchiveEmptyError,
         ArchiveOverwriteError,
+        UnsafeArchiveName,
         check_archive_dir,
         check_structure,
         publish,
@@ -249,6 +266,13 @@ def _compile(md_path: str) -> int:
     except InsightsValidationError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 7
+    except UnicodeDecodeError as exc:
+        # UnicodeDecodeError 是 ValueError 不是 OSError，接不住就会漏成 traceback
+        # 并以 1 退出——而 1 是「输出冲突」，脚本会照着完全错误的方向去恢复。
+        print(f"错误：{md} 不是 UTF-8 文本（{exc}）。"
+              f"它多半被编辑器另存成了别的编码——用 UTF-8 存回去，"
+              f"或者用本次运行产出的那份重新开始。", file=sys.stderr)
+        return 7
     except OSError as exc:
         print(f"错误：读不了 {md}——{exc}", file=sys.stderr)
         return 4
@@ -266,7 +290,8 @@ def _compile(md_path: str) -> int:
 
         archive = publish(
             md.parent, payload, archive_text,
-            [i["insight_id"] for _, items in grouped for i in items])
+            [i["insight_id"] for _, items in grouped for i in items],
+            archive_name=agent_file)
         # 分享版落 out_dir 根目录，那里 100% 是工具自有产物（语料只进 knowledge/，
         # 且 out_dir 非空时主 run 直接拒绝运行）——碰撞面不存在，所以不给它套
         # 档案那套覆盖授权。为一个不存在的风险加机制，本身就是一种谎。
@@ -291,6 +316,9 @@ def _compile(md_path: str) -> int:
     except ArchiveContractError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 9
+    except UnsafeArchiveName as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
     except ArchiveOverwriteError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
@@ -321,10 +349,13 @@ def main(argv: list[str] | None = None) -> int:
     # 无条件按首参数分流会让一个真叫 validate 的目录再也无法作为 source 处理
     # ——那是拿一个合法输入名去换命令语法，代价方向反了。
     subcommands = {"validate": _validate_command, "compile": _compile_command}
-    if (len(argv) == 2 and argv[0] in subcommands
+    # `len(argv) >= 2`：子命令要能带自己的选项（compile --agent-file）。
+    # 判据仍然挂在「第二个参数是一个已存在的文件」上，所以
+    # `kb-init compile -o out`（compile 是个源目录）照旧走 source 那条路。
+    if (len(argv) >= 2 and argv[0] in subcommands
             and Path(argv[1]).is_file()):
-        return subcommands[argv[0]](argv[1])
-    if (len(argv) == 2 and argv[0] in subcommands
+        return subcommands[argv[0]](argv[1], argv[2:])
+    if (len(argv) >= 2 and argv[0] in subcommands
             and not argv[1].startswith("-")          # `compile --help` 不是路径
             and not Path(argv[1]).exists()):
         # 形状与上面那条分支保持一致：两个参数、第二个像路径时，argv[0] 就是子命令。
@@ -340,6 +371,16 @@ def main(argv: list[str] | None = None) -> int:
         # 这个提醒只在那个文件真的存在时才会打印，所以不会误伤无关目录。
         _warn_if_stale_share_report(Path(argv[1]).parent)
         return 7
+    if (len(argv) >= 2 and argv[0] in subcommands
+            and not argv[1].startswith("-") and Path(argv[1]).is_dir()):
+        # 给的是目录。报「用法错误」会让人去检查命令怎么写，而命令是对的，
+        # 错的是指了个目录——诊断该把人指向那个目录里的 insights.md。
+        guess = Path(argv[1]) / "insights.md"
+        hint = f"你要的多半是 {guess}" if guess.is_file() else \
+            f"{argv[1]} 里没有 insights.md"
+        print(f"错误：kb-init {argv[0]} 要的是 insights.md 文件，"
+              f"不是目录 {argv[1]}。{hint}", file=sys.stderr)
+        return 2
     if argv and argv[0] in subcommands and not Path(argv[0]).exists():
         print(f"用法：kb-init {argv[0]} <insights.md>", file=sys.stderr)
         return 2

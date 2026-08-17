@@ -728,3 +728,173 @@ def test_missing_path_diagnosis_does_not_depend_on_cwd(tmp_path, monkeypatch,
     monkeypatch.chdir(tmp_path)
     assert main(["compile", "没有这个文件.md"]) == 7
     assert "找不到" in capsys.readouterr().err
+
+
+# ---------------- --agent-file ----------------
+
+def test_archive_defaults_to_claude_md(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert (tmp_path / "knowledge" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("name", ["AGENTS.md", "GEMINI.md", "context.md"])
+def test_agent_file_writes_that_name(tmp_path, name):
+    """Codex 读 AGENTS.md、Gemini 读 GEMINI.md——产出一个对方不读的文件，
+    等于没产出。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", name]) == 0
+    assert (tmp_path / "knowledge" / name).exists()
+    assert not (tmp_path / "knowledge" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("bad", ["../escape.md", "sub/dir.md", "..", "",
+                                 "/abs/path.md"])
+def test_agent_file_rejects_anything_that_is_not_a_bare_filename(tmp_path, bad):
+    """`--agent-file ../../x` 会把档案写到 knowledge/ 外面去。
+
+    这个值来自命令行、要拼进路径，是一条真实的路径穿越面——而这个工具的
+    输入本来就假定不可信（DESIGN R13 已为 zip 立过同样的规矩）。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", bad]) == 2
+    assert not any((tmp_path / "knowledge").iterdir())
+
+
+def test_receipt_records_the_actual_archive_name(tmp_path):
+    """回执说的必须是盘上那份的名字，不能永远写 CLAUDE.md——
+    产物不许撒谎，回执也是产物。"""
+    import json
+
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    main(["compile", str(tmp_path / "insights.md"), "--agent-file", "AGENTS.md"])
+    receipt = json.loads((tmp_path / "compile.json").read_text(encoding="utf-8"))
+    assert receipt["archive_path"] == "knowledge/AGENTS.md"
+
+
+def test_rerun_with_a_different_agent_file_does_not_touch_the_old_one(tmp_path):
+    """换个名字重跑：旧的那份不该被动，因为它没在这次的授权范围里。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    main(["compile", str(tmp_path / "insights.md")])
+    before = (tmp_path / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "AGENTS.md"]) == 0
+    assert (tmp_path / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == before
+
+
+def test_validate_still_takes_exactly_one_argument(tmp_path):
+    """配对守卫：给子命令加 flag 支持之后，validate 的用法不能跟着变松。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["validate", str(tmp_path / "insights.md")]) == 0
+    assert main(["validate", str(tmp_path / "insights.md"), "--agent-file", "x"]) == 2
+
+
+@pytest.mark.parametrize("bad", ["AGENTS.md.", "AGENTS.md ", "x.md:stream",
+                                 "CON.md", "nul", "LPT1.md"])
+def test_agent_file_rejects_windows_aliases(tmp_path, bad):
+    """这三类在 Windows 上会别名到另一个目录项：写进去的和回执里记的不是
+    同一个东西，而这个工具声称支持 Windows。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", bad]) == 2
+
+
+def test_illegal_agent_file_does_not_leave_a_lock(tmp_path):
+    """一个参数错误不该变成需要人去删文件才能解开的死结。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "../x.md"]) == 2
+    assert not (tmp_path / ".kb-init-compile.lock").exists()
+    # 配对正例：改对之后照样能跑
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+
+
+def test_receipt_for_another_archive_does_not_authorize_this_one(tmp_path):
+    """换过 --agent-file 之后两份档案内容常常一模一样、哈希也一样——
+    只比哈希的话，B 的回执会授权覆盖 A。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    claude = tmp_path / "knowledge" / "CLAUDE.md"
+    before = claude.read_text(encoding="utf-8")
+    # 现在回执描述的是 AGENTS.md
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "AGENTS.md"]) == 0
+    # 再回到 CLAUDE.md：回执说的不是它，必须拒绝
+    assert main(["compile", str(tmp_path / "insights.md")]) == 1
+    assert claude.read_text(encoding="utf-8") == before
+
+
+def test_missing_path_with_options_still_says_not_found(tmp_path, capsys):
+    """带 flag 时同样要报「找不到」而不是「用法错误」——
+    上一轮刚修好的诊断，不能只修没有 flag 的那一半。"""
+    from kb_init.cli import main
+
+    assert main(["compile", str(tmp_path / "没有.md"), "--agent-file", "A.md"]) == 7
+    assert "找不到" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", ["CON.tar.gz", "COM1.a.b", "nul.x.y"])
+def test_windows_device_names_with_multiple_suffixes(tmp_path, bad):
+    """Windows 认第一个点之前那一段——按 PurePath.stem 判会整个绕过去。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", bad]) == 2
+
+
+def test_compile_does_not_delete_a_file_that_looks_like_our_temp(tmp_path):
+    """档案名是用户给的：先用 --agent-file .AGENTS.md.tmp 生成一份，
+    再用 --agent-file AGENTS.md 跑一次，固定临时名会把前一份静默删掉。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    victim = tmp_path / "knowledge" / ".AGENTS.md.tmp"
+    victim.write_text("我自己的文件", encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "AGENTS.md"]) == 0
+    assert victim.exists() and victim.read_text(encoding="utf-8") == "我自己的文件"
+
+
+@pytest.mark.parametrize("cmd", ["compile", "validate"])
+def test_directory_argument_points_at_insights_md(tmp_path, cmd, capsys):
+    """给的是目录时，诊断要把人指向那个目录里的 insights.md，
+    而不是让他去检查命令怎么写——命令是对的。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main([cmd, str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "insights.md" in err and "目录" in err
+
+
+def test_non_utf8_insights_md_reports_7_not_a_traceback(tmp_path, capsys):
+    """UnicodeDecodeError 是 ValueError 不是 OSError，接不住会漏成 traceback
+    并以 1 退出——而 1 是「输出冲突」，脚本会照着完全错误的方向恢复。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    (tmp_path / "insights.md").write_bytes("- [x] `T1` 内容".encode("gbk"))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 7
+    err = capsys.readouterr().err
+    assert "UTF-8" in err and "Traceback" not in err

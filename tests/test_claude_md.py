@@ -616,9 +616,9 @@ def test_write_failure_midway_leaves_no_tmp(tmp_path, monkeypatch):
     import kb_init.claude_md as mod
 
     out = _out_dir(tmp_path)
-    monkeypatch.setattr(mod, "_write_exclusive",
-                        lambda p, d: (p.write_bytes(d[:2]),
-                                      (_ for _ in ()).throw(OSError("断了")))[1])
+    monkeypatch.setattr(mod, "_write_temp",
+                        lambda d, prefix, data: (_ for _ in ()).throw(
+                            OSError("断了")))
     with pytest.raises(OSError):
         publish(out, _payload(_insight("T1")), "内容 A", ["T1"])
     assert _tmp_leftovers(out) == []
@@ -663,8 +663,9 @@ def test_tmp_write_failure_keeps_old_archive_and_its_receipt(tmp_path, monkeypat
     publish(out, payload, "内容 A", ["T1"])
     before = (out / RECEIPT_NAME).read_text(encoding="utf-8")
 
-    monkeypatch.setattr(mod, "_write_exclusive",
-                        lambda p, d: (_ for _ in ()).throw(OSError("磁盘满了")))
+    monkeypatch.setattr(mod, "_write_temp",
+                        lambda d, prefix, data: (_ for _ in ()).throw(
+                            OSError("磁盘满了")))
     with pytest.raises(OSError):
         publish(out, payload, "内容 B", ["T1"])
 
@@ -774,3 +775,29 @@ def test_unreadable_receipt_is_treated_as_absent(tmp_path):
     with pytest.raises(ArchiveOverwriteError):
         publish(out, payload, "内容 B", ["T1"])
     assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "内容 A"
+
+
+def test_file_appearing_after_authorization_is_not_silently_overwritten(tmp_path,
+                                                                        monkeypatch):
+    """授权时目标不存在，写之前被别人建了出来——它绝不能落进 replace 分支。
+
+    我们从没为那个文件拿到过授权，而 `os.replace` 会一声不响地盖掉它。
+    走哪条路必须由**授权那一刻**决定，不能在写盘前重新问一次 exists()。
+    """
+    import kb_init.claude_md as mod
+
+    out = _out_dir(tmp_path)
+    payload = _payload(_insight("T1"))
+    real = mod._write_temp
+
+    def sneak(directory, prefix, data):
+        tmp = real(directory, prefix, data)
+        # 模拟另一个进程在授权之后、写盘之前建出了这个文件
+        (out / "knowledge" / "CLAUDE.md").write_text("别人刚建的", encoding="utf-8")
+        return tmp
+
+    monkeypatch.setattr(mod, "_write_temp", sneak)
+    with pytest.raises(OSError):
+        publish(out, payload, "我们的内容", ["T1"])
+    assert (out / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == "别人刚建的"
+    assert not (out / LOCK_NAME).exists()
