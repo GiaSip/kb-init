@@ -886,3 +886,15 @@ def test_directory_argument_points_at_insights_md(tmp_path, cmd, capsys):
     assert main([cmd, str(tmp_path)]) == 2
     err = capsys.readouterr().err
     assert "insights.md" in err and "目录" in err
+
+
+def test_non_utf8_insights_md_reports_7_not_a_traceback(tmp_path, capsys):
+    """UnicodeDecodeError 是 ValueError 不是 OSError，接不住会漏成 traceback
+    并以 1 退出——而 1 是「输出冲突」，脚本会照着完全错误的方向恢复。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    (tmp_path / "insights.md").write_bytes("- [x] `T1` 内容".encode("gbk"))
+    assert main(["compile", str(tmp_path / "insights.md")]) == 7
+    err = capsys.readouterr().err
+    assert "UTF-8" in err and "Traceback" not in err

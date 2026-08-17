@@ -379,7 +379,7 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str],
         tmp.unlink(missing_ok=True)
 
 
-def _authorize(target, out_dir, payload: dict, archive_name: str) -> None:
+def _authorize(target, out_dir, payload: dict, archive_name: str) -> bool:
     """三条全满足才允许替换：回执在且 run_id 一致 / 现存文件哈希等于回执所记 /
     目标不是符号链接。
 
@@ -390,7 +390,7 @@ def _authorize(target, out_dir, payload: dict, archive_name: str) -> None:
             f"{target} 是一个符号链接。绝不跟随符号链接写——那能把任意路径"
             f"变成写入目标。删掉它再重跑。")
     if not target.exists():
-        return
+        return False
 
     receipt = _read_receipt(out_dir)
     if receipt is None:
@@ -437,6 +437,7 @@ def _authorize(target, out_dir, payload: dict, archive_name: str) -> None:
         raise ArchiveOverwriteError(
             f"{target} 自上次生成之后被改动过。那是你的编辑，不该被无声抹掉——"
             f"拒绝覆盖。想重新生成就先删掉它。")
+    return True
 
 
 def check_archive_dir(out_dir) -> None:
@@ -498,7 +499,7 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
         # os.close 放进 try：它抛异常的概率极低，但放在外面就意味着
         # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
         os.close(fd)
-        _authorize(target, out_dir, payload, archive_name)
+        replacing = _authorize(target, out_dir, payload, archive_name)
         data = _encode(text, "档案正文")
         try:
             # 写 tmp 放进这个 try：写到一半失败（磁盘满、被打断）同样会
@@ -514,11 +515,14 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
             # 不作废的话，「档案换成新的、回执写失败」会留下一份记着旧哈希的
             # 回执——它会（错误地）指控用户手改过档案，而其实是我们换的。
             (out_dir / RECEIPT_NAME).unlink(missing_ok=True)
-            if target.exists():
+            # 走哪条路**由授权那一刻决定**，不在这里重新问一次 `exists()`。
+            # 重新问的话，授权时不存在、这中间被别人建出来的文件会落进
+            # `os.replace` 分支被静默覆盖——而我们从没为它拿到过授权。
+            if replacing:
                 os.replace(tmp, target)
             else:
-                # 新建走 link：原子且独占——「检查时不存在」与「创建」之间
-                # 不留窗口，别的进程抢先建了就会抛而不是被我们覆盖。
+                # 新建走 link：原子且独占——别的进程抢先建了就会抛，
+                # 而不是被我们覆盖。
                 os.link(tmp, target)
         finally:
             if tmp is not None:

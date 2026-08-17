@@ -266,6 +266,13 @@ def _compile(md_path: str, agent_file: str = ARCHIVE_NAME) -> int:
     except InsightsValidationError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 7
+    except UnicodeDecodeError as exc:
+        # UnicodeDecodeError 是 ValueError 不是 OSError，接不住就会漏成 traceback
+        # 并以 1 退出——而 1 是「输出冲突」，脚本会照着完全错误的方向去恢复。
+        print(f"错误：{md} 不是 UTF-8 文本（{exc}）。"
+              f"它多半被编辑器另存成了别的编码——用 UTF-8 存回去，"
+              f"或者用本次运行产出的那份重新开始。", file=sys.stderr)
+        return 7
     except OSError as exc:
         print(f"错误：读不了 {md}——{exc}", file=sys.stderr)
         return 4
