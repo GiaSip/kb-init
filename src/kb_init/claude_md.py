@@ -238,7 +238,31 @@ def render_archive(payload: dict, grouped: Grouped) -> str:
 RECEIPT_NAME = "compile.json"
 LOCK_NAME = ".kb-init-compile.lock"
 ARCHIVE_DIR = "knowledge"
+# 默认仍是 CLAUDE.md，但**不再写死**：Codex 读 AGENTS.md、Gemini 读 GEMINI.md，
+# 产出一个对方不读的文件等于没产出。而这个工具选独立 CLI 的理由本来就是
+# 「谁都可以用」（DESIGN §7）。
 ARCHIVE_NAME = "CLAUDE.md"
+
+
+class UnsafeArchiveName(ValueError):
+    """`--agent-file` 的值要拼进路径，所以它是一条真实的路径穿越面。"""
+
+
+def check_archive_name(name: str) -> str:
+    """只接受**裸文件名**。
+
+    `../../x.md` 会把档案写到 knowledge/ 外面去，而这个值直接来自命令行。
+    这个工具对输入本来就不预设善意（DESIGN R13 已为 zip 立过同一条规矩），
+    命令行参数没有理由例外。
+    """
+    from pathlib import PurePath
+
+    if (not name or name in (".", "..") or "/" in name or "\\" in name
+            or PurePath(name).name != name):
+        raise UnsafeArchiveName(
+            f"--agent-file 只接受一个文件名（比如 AGENTS.md），不接受路径：{name!r}。"
+            f"档案只会写进输出目录的 knowledge/ 里。")
+    return name
 RECEIPT_SCHEMA_VERSION = "0.1"
 
 
@@ -293,7 +317,8 @@ def _write_exclusive(path, data: bytes) -> None:
         handle.write(data)
 
 
-def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) -> None:
+def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str],
+                   archive_name: str = ARCHIVE_NAME) -> None:
     import json
     import os
 
@@ -304,7 +329,9 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str]) 
         "run_id": payload["run_id"],
         "corpus_hash": payload["corpus_hash"],
         "tool_version": __version__,
-        "archive_path": f"{ARCHIVE_DIR}/{ARCHIVE_NAME}",
+        # 回执说的必须是盘上那份的名字。永远写 CLAUDE.md 的话，
+        # 换了 --agent-file 之后回执就在描述一个不存在的文件——回执也是产物。
+        "archive_path": f"{ARCHIVE_DIR}/{archive_name}",
         "archive_sha256": digest,
         "insight_ids": list(insight_ids),
     }
@@ -394,7 +421,8 @@ def check_archive_dir(out_dir) -> None:
             f"而这个目录本该由上一步生成——请确认 -o 指的是完整的输出目录。")
 
 
-def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
+def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
+            archive_name: str = ARCHIVE_NAME):
     """授权 → 原子写档案 → 写回执。返回档案路径。
 
     顺序是「先档案后回执」：两个文件做不到共同原子，就把失败留在信息量最小的
@@ -418,8 +446,9 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
             f"另一个 compile 正在这个目录里运行（锁文件 {lock}）。"
             f"确认没有之后，删掉这个锁文件再重跑。") from exc
 
-    target = archive_dir / ARCHIVE_NAME
-    tmp = archive_dir / f".{ARCHIVE_NAME}.tmp"
+    archive_name = check_archive_name(archive_name)
+    target = archive_dir / archive_name
+    tmp = archive_dir / f".{archive_name}.tmp"
     try:
         # os.close 放进 try：它抛异常的概率极低，但放在外面就意味着
         # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
@@ -448,7 +477,8 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str]):
                 os.link(tmp, target)
         finally:
             tmp.unlink(missing_ok=True)
-        _write_receipt(out_dir, payload, _sha256(data), insight_ids)
+        _write_receipt(out_dir, payload, _sha256(data), insight_ids,
+                       archive_name=archive_name)
     finally:
         lock.unlink(missing_ok=True)
     return target

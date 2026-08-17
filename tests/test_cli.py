@@ -728,3 +728,76 @@ def test_missing_path_diagnosis_does_not_depend_on_cwd(tmp_path, monkeypatch,
     monkeypatch.chdir(tmp_path)
     assert main(["compile", "没有这个文件.md"]) == 7
     assert "找不到" in capsys.readouterr().err
+
+
+# ---------------- --agent-file ----------------
+
+def test_archive_defaults_to_claude_md(tmp_path):
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    assert (tmp_path / "knowledge" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("name", ["AGENTS.md", "GEMINI.md", "context.md"])
+def test_agent_file_writes_that_name(tmp_path, name):
+    """Codex 读 AGENTS.md、Gemini 读 GEMINI.md——产出一个对方不读的文件，
+    等于没产出。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", name]) == 0
+    assert (tmp_path / "knowledge" / name).exists()
+    assert not (tmp_path / "knowledge" / "CLAUDE.md").exists()
+
+
+@pytest.mark.parametrize("bad", ["../escape.md", "sub/dir.md", "..", "",
+                                 "/abs/path.md"])
+def test_agent_file_rejects_anything_that_is_not_a_bare_filename(tmp_path, bad):
+    """`--agent-file ../../x` 会把档案写到 knowledge/ 外面去。
+
+    这个值来自命令行、要拼进路径，是一条真实的路径穿越面——而这个工具的
+    输入本来就假定不可信（DESIGN R13 已为 zip 立过同样的规矩）。
+    """
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", bad]) == 2
+    assert not any((tmp_path / "knowledge").iterdir())
+
+
+def test_receipt_records_the_actual_archive_name(tmp_path):
+    """回执说的必须是盘上那份的名字，不能永远写 CLAUDE.md——
+    产物不许撒谎，回执也是产物。"""
+    import json
+
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    main(["compile", str(tmp_path / "insights.md"), "--agent-file", "AGENTS.md"])
+    receipt = json.loads((tmp_path / "compile.json").read_text(encoding="utf-8"))
+    assert receipt["archive_path"] == "knowledge/AGENTS.md"
+
+
+def test_rerun_with_a_different_agent_file_does_not_touch_the_old_one(tmp_path):
+    """换个名字重跑：旧的那份不该被动，因为它没在这次的授权范围里。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    main(["compile", str(tmp_path / "insights.md")])
+    before = (tmp_path / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8")
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "AGENTS.md"]) == 0
+    assert (tmp_path / "knowledge" / "CLAUDE.md").read_text(encoding="utf-8") == before
+
+
+def test_validate_still_takes_exactly_one_argument(tmp_path):
+    """配对守卫：给子命令加 flag 支持之后，validate 的用法不能跟着变松。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["validate", str(tmp_path / "insights.md")]) == 0
+    assert main(["validate", str(tmp_path / "insights.md"), "--agent-file", "x"]) == 2

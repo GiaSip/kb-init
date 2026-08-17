@@ -46,7 +46,7 @@ uvx kb-init ~/Downloads/notion-export -o my-kb
 ```
 my-kb/
 ├── knowledge/          干净的标准 Markdown（默认相对路径链接，不绑定 Obsidian）
-│   └── CLAUDE.md       给 agent 读的档案（跑 kb-init compile 之后才有）
+│   └── CLAUDE.md       给 agent 读的档案（compile 之后才有；名字可用 --agent-file 换）
 ├── report.private.html 给你自己看的报告：双击打开，看完回到 insights.md 勾选
 ├── report.share.html   可以发出去的那一版（compile 之后才有，见下）
 ├── index.json          主题索引：分块、聚类归属、代表文档、时间轴条件门
@@ -134,6 +134,13 @@ ID 缺失 / 重复 / 不认识 / 跟 `insights.json` 不是同一次运行，一
 kb-init compile my-kb/insights.md     # → my-kb/knowledge/CLAUDE.md
 ```
 
+用别的 agent？档案文件名可以换——**产出一个对方不读的文件等于没产出**：
+
+```bash
+kb-init compile my-kb/insights.md --agent-file AGENTS.md    # Codex 等
+kb-init compile my-kb/insights.md --agent-file GEMINI.md    # Gemini
+```
+
 它只收**你勾选过、且声明了去向**的洞察：语料层统计（留存率、断链数）对 agent 没用，
 不进档案。**档案里的每一句都逐字等于你在清单上审过的那一句**——不重新措辞，
 因为「你审过的正是最终进去的」是这道人工确认的全部价值。
@@ -146,6 +153,38 @@ kb-init compile my-kb/insights.md     # → my-kb/knowledge/CLAUDE.md
 
 > ⚠️ 你的知识库里如果本来就有一篇笔记叫 `CLAUDE.md`，compile 会拒绝写入并告诉你。
 > 删掉或改名再重跑。
+
+## 让 agent 帮你跑（以及哪一步它不能替你）
+
+装和跑都可以交给 agent（Claude Code / Codex / 其他）。**只有中间那一步不行。**
+
+理由不是不信任 agent，而是这个工具的安全性整个压在那一步上：`insights.md` 产出时
+每条都是**预先勾上的**，直接 `compile` 等于把全部洞察原样收进档案。而关键词命名
+会翻车——单一语言独占一个簇时，出来的可能只是那门语言的常用词
+（实测：一份语料 10 组里 9 组可辨认，另一份 5 组里只有 3 组）。
+**只有看的人能判断这一组认不认得出。**
+
+所以分工是：
+
+| 谁 | 做什么 |
+|---|---|
+| agent | 装 uv、跑 `kb-init`、把 `report.private.html` 递给你 |
+| **你** | **打开报告，把认不出的那几组取消勾选**（十几条，几分钟） |
+| agent | 跑 `kb-init compile`，把档案放到该放的地方 |
+
+可以直接贴给 agent 的一段话：
+
+```
+帮我跑一下 kb-init（一个把笔记导出编译成 AI 可用知识库的 CLI）：
+1. 确认装了 uv；然后 uvx --from <仓库地址> kb-init <我的导出目录> -o my-kb
+2. 跑完把 my-kb/report.private.html 打开给我看，然后停下来等我
+3. 我勾选完 my-kb/insights.md 会告诉你，那时再跑：
+   uvx --from <仓库地址> kb-init compile my-kb/insights.md --agent-file AGENTS.md
+   （文件名按你自己读哪份改：Claude Code 用 CLAUDE.md，Codex 用 AGENTS.md）
+第 2 步之后**必须停下来**——那一步的勾选只有我能做，工具的可靠性压在它上面。
+注意：第一次运行要下载约 90MB 的模型，按分钟计，别当成卡死；
+macOS Intel 装不上（依赖没有那个平台的预编译包），遇到编译失败不要试图修。
+```
 
 ## 设计取舍
 
