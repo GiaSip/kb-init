@@ -148,24 +148,21 @@ class ProbeError(RuntimeError):
 
 
 def _json_escaped(needle: str) -> str | None:
-    """`json.dumps` 默认 `ensure_ascii=True` 时，非 ASCII 字符在文件里长成
-    `\\u4f73\\u8d24` 那样。拿解码后的原文去 grep，那类文件里的泄露一个都查不出来
+    """探针词在 JSON 文件里的样子。
+
+    `json.dumps` 的默认 `ensure_ascii=True` 会把非 ASCII 写成 `\\uXXXX`，
+    同时把 `"` 与 `\\` 也转义掉。拿原文去 grep，那类文件里的泄露一个都查不出来
     ——而这个仓库的测试 fixture 就有用默认参数写 json 的。
 
-    两处容易写错，都会造成假绿：
+    **直接用 `json.dumps` 生成，不手搓**：手搓版本漏过两次
+    （一次把 ASCII 也一起转义得到任何真实 JSON 里都不存在的串；一次按「有没有
+    汉字」判断，于是带变音符的拉丁词根本不生成转义形式）。这里的规则本来就
+    由标准库定义，重新实现一遍只是在给自己制造漏报面。
 
-    1. **只转 ASCII 之外的那些字符**。含中文时把整串（包括英文字母）都转成
-       `\\u0068` 这种形式，得到的串在任何真实 JSON 里都不存在，等于白查。
-    2. **触发条件是「有没有非 ASCII 字符」，不是「有没有汉字」**。这份语料是
-       中英意三语，带变音符的拉丁词（形如 `caf` + `\\u00e9`）按汉字判就根本不生成
-       转义形式。
-
-    ⚠️ 顺带一条：**别把语料风格的词写进这个文件当例子**——写进来它就成了下一个
-    命中源，而检查器自己刷屏会让人开始忽略它的输出。上面那个例子是拆开写的。
+    ⚠️ 别把语料风格的词写进这个文件当例子——写进来它就成了下一个命中源。
     """
-    if needle.isascii():
-        return None
-    return "".join(c if c.isascii() else f"\\u{ord(c):04x}" for c in needle)
+    escaped = json.dumps(needle)[1:-1]
+    return escaped if escaped != needle else None
 
 
 def hits(needle: str) -> list[str]:
