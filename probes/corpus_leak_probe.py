@@ -15,11 +15,15 @@
 是两回事——所以这是**发布前的人工检查项，不是 CI 门**：它把候选列出来，由人扫一眼。
 把它做成自动门的话，噪音会逼着后来的人加豁免，而豁免清单迟早会把真命中也豁免掉。
 
-退出码：0 干净 / 1 有命中（**需要人看**，不等于一定有问题）。
+**已知漏报面**（如实写明，不假装覆盖）：跨行切碎的字符串查不到——`git grep` 与
+`git log -S` 都按行匹配。所以它不是"证明没泄露"，是"把最常见的那几类捞出来"。
+
+退出码：0 干净 / 1 有命中（**需要人看**）/ 2 检查本身没跑成。
 """
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -39,7 +43,34 @@ GENERIC = {"design", "architecture", "layout", "settings", "template", "command"
            # 实跑一次之后补的：这些词命中仓库与语料无关（Claude 是模型名，
            # Content 来自 Content-Security-Policy，Counter 是 Python 类，
            # Silicon 来自 README 的 Apple Silicon，another 在内置停用词表里）。
-           "claude", "content", "counter", "silicon", "another", "indesign"}
+           "claude", "content", "counter", "silicon", "another", "indesign",
+           # 第二轮实跑之后补的。⚠️ 往这个表里加词是有代价的：加错一个，
+           # 将来那个词真的泄露了也不会报。所以只加**词典词**与**产品名**，
+           # 不加任何看起来像人名、账号名、项目代号的东西。
+           # preposizione / grammatica 是意大利语的语法术语，2B 的合成 fixture
+           # 拿它们测意语停用词过滤，与用户的笔记只是撞词。
+           "preposizione", "grammatica", "account", "author", "profile",
+           "claude code", "recovery", "toggle"}
+
+
+_URL = re.compile(r"https?://[^\s\u3000）)】」』，。；]+")
+# 连续 CJK 段：中文标题没有空格，只按空白切会得到「整句」一个探针，
+# 而真实泄露往往是**片段**（引用半句、抄一个词组）。按标点切出连续 CJK 段，
+# 每段本身就足够独特。漏报比误报危险得多，这里刻意偏向多产生候选。
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]{5,}")
+
+
+def _fragments(text: str) -> set[str]:
+    out = {text} if len(text) >= MIN_LEN else set()
+    out.update(w for w in text.split() if len(w) >= MIN_LEN)
+    for url in _URL.findall(text):
+        out.add(url)
+        # 也单独放主机名：实际漏出去的那次，仓库里留的就是 URL 的一部分。
+        host = url.split("//", 1)[-1].split("/", 1)[0]
+        if len(host) >= MIN_LEN:
+            out.add(host)
+    out.update(_CJK_RUN.findall(text))
+    return out
 
 
 def probes(paths: list[Path]) -> set[str]:
@@ -49,21 +80,34 @@ def probes(paths: list[Path]) -> set[str]:
         for item in payload.get("insights", []):
             body = item.get("payload") or {}
             for kw in body.get("keywords") or []:
-                out.add(str(kw))
+                out |= _fragments(str(kw))
             for title in body.get("evidence_titles") or []:
-                # 标题整句太长且常带标点，按空白切成词再筛
-                out.update(str(title).split())
+                out |= _fragments(str(title))
     return {p for p in out
             if len(p) >= MIN_LEN and p.lower() not in GENERIC and not p.isdigit()}
+
+
+class ProbeError(RuntimeError):
+    """git 本身出错。**必须抛，不能当作"没命中"**——一个把错误读成干净的
+    检查器比没有检查器更糟：它会在你最需要它的那次给你一个绿灯。"""
 
 
 def hits(needle: str) -> list[str]:
     found = []
     for args, label in (
-        (["git", "grep", "-l", "-F", needle], "工作树"),
-        (["git", "log", "--all", "-S", needle, "--oneline"], "历史"),
+        # `-e` 与 `--` 都不是可选的：以 `-` 开头的探针词否则会被 git 当成选项，
+        # 于是这个词永远查不出命中——而漏报正是这个脚本要防的东西。
+        # `-i` 是因为大小写变体照样是泄露。
+        (["git", "grep", "-l", "-i", "-F", "-e", needle, "--"], "工作树"),
+        (["git", "log", "--all", "--oneline", "--regexp-ignore-case",
+          f"-S{needle}"], "历史"),
     ):
         result = subprocess.run(args, cwd=REPO, capture_output=True, text=True)
+        # git grep / git log 的 1 是「没找到」，其余非零是真错误。
+        if result.returncode not in (0, 1):
+            raise ProbeError(
+                f"{label}查询失败（exit {result.returncode}）："
+                f"{result.stderr.strip()[:200]}")
         if result.stdout.strip():
             found.append(f"{label}: {result.stdout.strip().splitlines()[0]}")
     return found
@@ -81,7 +125,11 @@ def main(argv: list[str]) -> int:
 
     needles = probes(paths)
     print(f"从 {len(paths)} 份产物取到 {len(needles)} 个探针词")
-    leaked = {n: h for n in sorted(needles) if (h := hits(n))}
+    try:
+        leaked = {n: h for n in sorted(needles) if (h := hits(n))}
+    except ProbeError as exc:
+        print(f"检查中止：{exc}", file=sys.stderr)
+        return 2
     if not leaked:
         print("✅ 仓库与历史里没有真实语料内容")
         return 0

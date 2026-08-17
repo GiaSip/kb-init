@@ -6,10 +6,13 @@
 
 | 平台 | 状态 |
 |---|---|
-| Windows x64 / arm64 | ✅ |
-| Linux x64 / aarch64 | ✅ 需要 glibc ≥ 2.28（Ubuntu 20.04+、Debian 10+、RHEL 8+） |
-| macOS Apple Silicon | ✅ 需要 macOS ≥ 14 |
+| Windows x64 | ✅ 依赖齐全，CI 覆盖 |
+| Linux x64 | ✅ 依赖齐全，CI 覆盖。需要 glibc ≥ 2.28（Ubuntu 20.04+、Debian 10+、RHEL 8+） |
+| macOS Apple Silicon | ✅ 依赖齐全，CI 覆盖。需要 macOS ≥ 14 |
+| Windows arm64 / Linux aarch64 | ⚠️ 依赖有对应 wheel，但**我们没测过**——大概率能用，出问题请开 issue |
 | **macOS Intel** | ❌ **不支持** |
+
+Python：**3.12 / 3.13**。上界是刻意的——更高的版本我们还没测过，测过再放开。
 
 macOS Intel 这一条不是我们偷懒：向量推理依赖 `onnxruntime`，而它已经不再发布
 macOS x86_64 的预编译包（逐版本查过，至少从 1.18 起就没有了）。在 Intel Mac 上装它

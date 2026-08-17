@@ -37,13 +37,26 @@ class ProgressPrinter:
     def _say(self, text: str) -> None:
         print(text, file=self._stream, flush=True)
 
-    def __call__(self, event: dict) -> None:
-        """进度是附属品，绝不能拖垮主流程——认不出的事件一律忽略。
+    def __call__(self, event) -> None:
+        """进度是附属品，**绝不能拖垮主流程**。
 
-        这里的「忽略」不是兜底路径：它不让任何规则失效，只是让一个纯展示层
-        对上游新增事件保持沉默，而不是把整次运行炸掉。
+        整个方法包在 try 里，不是偷懒：这一层唯一的产出是几行给人看的字，
+        而它能炸掉的是一次要跑好几分钟、已经算完一半的索引。两者的代价差着
+        数量级。最现实的那条炸法是 **Windows 控制台编码撑不住中文**——
+        而 Windows 正是我们声称支持的平台之一；其次是上游把事件换了形状。
+        
+        这不是「兜底路径」：它不让任何规则失效，也不影响任何产物，
+        只是让一个纯展示层在自己出问题时闭嘴。
         """
-        kind = (event or {}).get("event")
+        try:
+            self._dispatch(event)
+        except Exception:
+            pass
+
+    def _dispatch(self, event) -> None:
+        if not isinstance(event, dict):
+            return
+        kind = event.get("event")
         if kind == "model_loading":
             self._say("正在准备向量模型（首次运行需下载约 90MB，按分钟计；"
                       "之后会用本地缓存）…")

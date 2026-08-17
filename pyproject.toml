@@ -3,7 +3,9 @@ name = "kb-init"
 version = "0.1.0"
 description = "Compile your old note exports into a knowledge base your AI agent can actually use"
 readme = "README.md"
-requires-python = ">=3.12"
+# 上界不是保守，是不撒谎：classifiers 与 CI 矩阵只覆盖 3.12–3.13，
+# 而 ">=3.12" 会让 3.14 用户装上一个从没被测过的组合。验过再放。
+requires-python = ">=3.12,<3.14"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "GiaSip" }]
