@@ -116,7 +116,15 @@ def _fragments(text: str) -> set[str]:
     return out
 
 
+def probes_of(path: Path) -> set[str]:
+    return _probes([path])
+
+
 def probes(paths: list[Path]) -> set[str]:
+    return _probes(paths)
+
+
+def _probes(paths: list[Path]) -> set[str]:
     out: set[str] = set()
     for path in paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -218,6 +226,16 @@ def main(argv: list[str]) -> int:
     missing = [p for p in paths if not p.exists()]
     if missing:
         print(f"找不到：{missing}", file=sys.stderr)
+        return 2
+
+    # **逐份**判空，不是合并之后判：给两份、其中一份是空的时候，合起来非空
+    # 就不报了，而那一份实际上根本没被检查——「有一份查过了」不等于「都查过了」，
+    # 这是空集合让结论恒真的逐文件版本。
+    empty = [p for p in paths if not probes_of(p)]
+    if empty:
+        print(f"检查中止：这些文件一个探针词都取不到：{[str(p) for p in empty]}"
+              f"——它们可能不是 insights.json，或者没有 keywords / evidence_titles。"
+              f"这不叫干净，叫没查。", file=sys.stderr)
         return 2
 
     needles = probes(paths)
