@@ -32,7 +32,11 @@ REPO = Path(__file__).resolve().parent.parent
 
 # 太短或太通用的词会把整个仓库都命中，那样的检查等于没有检查
 # （全是噪音时人会直接忽略它，和恒返回脏是同一个病）。
+#
+# 中文的阈值单独放低一位：四字词（项目代号、成语式命名）在中文里既常见又独特，
+# 而四个字母的英文词满地都是。用同一个数字卡两种文字，等于在其中一种上做错。
 MIN_LEN = 5
+MIN_LEN_CJK = 4
 
 # 这些词虽然来自语料，但它们本来就是通用技术词，出现在仓库里与语料无关。
 GENERIC = {"design", "architecture", "layout", "settings", "template", "command",
@@ -57,8 +61,9 @@ _URL = re.compile(r"https?://[^\s\u3000）)】」』，。；]+")
 # 连续 CJK 段：中文标题没有空格，只按空白切会得到「整句」一个探针，
 # 而真实泄露往往是**片段**（引用半句、抄一个词组）。按标点切出连续 CJK 段，
 # 每段本身就足够独特。漏报比误报危险得多，这里刻意偏向多产生候选。
-_CJK_RUN = re.compile(r"[\u4e00-\u9fff]{5,}")
+_CJK_RUN = re.compile(r"[\u4e00-\u9fff]{4,}")
 _CJK_WINDOW = 6
+_CJK = re.compile(r"[\u4e00-\u9fff]")
 
 
 # 两端都要剥：只剥右侧的话，`(Falcon)` 会变成 `(Falcon`，而仓库里那个裸的
@@ -86,11 +91,10 @@ def _fragments(text: str) -> set[str]:
             out.add(host)
     for run in _CJK_RUN.findall(text):
         out.add(run)
-        # 长段还要切窗：仓库里引用的常常只是半句。整段进不了命中，
-        # 而半句才是真实的引用方式——这条不补就是一条稳定的假绿路径。
-        # 窗口不重叠地走，控制候选数量：这是个人工检查工具，
-        # 探针爆炸到没人看，与漏报是同一个结果。
-        for i in range(0, len(run) - _CJK_WINDOW + 1, _CJK_WINDOW):
+        # 长段要切**逐字滑窗**，不是不重叠地跳着切：仓库里引用的常常只是半句，
+        # 而人从哪个字开始摘是任意的。步长等于窗长的话，凡是跨窗口边界的那半句
+        # 就永远生不成探针——那是一条稳定的假绿路径，而它看起来完全正常。
+        for i in range(len(run) - _CJK_WINDOW + 1):
             out.add(run[i:i + _CJK_WINDOW])
     return out
 
@@ -105,8 +109,12 @@ def probes(paths: list[Path]) -> set[str]:
                 out |= _fragments(str(kw))
             for title in body.get("evidence_titles") or []:
                 out |= _fragments(str(title))
+    def long_enough(word: str) -> bool:
+        floor = MIN_LEN_CJK if _CJK.search(word) else MIN_LEN
+        return len(word) >= floor
+
     return {p for p in out
-            if len(p) >= MIN_LEN and p.lower() not in GENERIC and not p.isdigit()}
+            if long_enough(p) and p.lower() not in GENERIC and not p.isdigit()}
 
 
 class ProbeError(RuntimeError):
@@ -114,7 +122,28 @@ class ProbeError(RuntimeError):
     检查器比没有检查器更糟：它会在你最需要它的那次给你一个绿灯。"""
 
 
+def _json_escaped(needle: str) -> str | None:
+    """`json.dumps` 默认 `ensure_ascii=True`，中文在文件里是 `\\u4f73\\u8d24` 这种样子。
+
+    拿解码后的汉字去 grep，那类文件里的泄露一个都查不出来——而这个仓库的
+    测试 fixture 就有用默认参数写 json 的。**这是一条真实会发生的假绿路径。**
+    """
+    if not _CJK.search(needle):
+        return None
+    return "".join(f"\\u{ord(c):04x}" for c in needle)
+
+
 def hits(needle: str) -> list[str]:
+    found = []
+    escaped = _json_escaped(needle)
+    if escaped:
+        found += [f"{label}(JSON 转义形式): {line}"
+                  for label, line in _scan(escaped)]
+    found += [f"{label}: {line}" for label, line in _scan(needle)]
+    return found
+
+
+def _scan(needle: str) -> list[tuple[str, str]]:
     found = []
     for args, label in (
         # `-e` 与 `--` 都不是可选的：以 `-` 开头的探针词否则会被 git 当成选项，
@@ -146,7 +175,7 @@ def hits(needle: str) -> list[str]:
                 f"{label}查询失败（exit {result.returncode}）："
                 f"{result.stderr.strip()[:200]}")
         if result.stdout.strip():
-            found.append(f"{label}: {result.stdout.strip().splitlines()[0]}")
+            found.append((label, result.stdout.strip().splitlines()[0]))
     return found
 
 
