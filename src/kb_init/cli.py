@@ -348,7 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     if (len(argv) >= 2 and argv[0] in subcommands
             and Path(argv[1]).is_file()):
         return subcommands[argv[0]](argv[1], argv[2:])
-    if (len(argv) == 2 and argv[0] in subcommands
+    if (len(argv) >= 2 and argv[0] in subcommands
             and not argv[1].startswith("-")          # `compile --help` 不是路径
             and not Path(argv[1]).exists()):
         # 形状与上面那条分支保持一致：两个参数、第二个像路径时，argv[0] 就是子命令。

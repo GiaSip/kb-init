@@ -262,7 +262,27 @@ def check_archive_name(name: str) -> str:
         raise UnsafeArchiveName(
             f"--agent-file 只接受一个文件名（比如 AGENTS.md），不接受路径：{name!r}。"
             f"档案只会写进输出目录的 knowledge/ 里。")
+    # 以下三类在 Windows 上会**别名到另一个目录项**——写进去的和回执里记的
+    # 不是同一个东西，而这个工具声称支持 Windows。
+    if name != name.rstrip(". "):
+        # `AGENTS.md.` 与 `AGENTS.md ` 在 Win32 上都指向 `AGENTS.md`
+        raise UnsafeArchiveName(
+            f"文件名不能以点或空格结尾（在 Windows 上它会指向另一个文件）：{name!r}")
+    if ":" in name:
+        # `x.md:stream` 是 NTFS 的备用数据流，内容会写进一个看不见的地方
+        raise UnsafeArchiveName(f"文件名不能含冒号：{name!r}")
+    if PurePath(name).stem.upper() in _WIN_DEVICE_NAMES:
+        raise UnsafeArchiveName(
+            f"{name!r} 是 Windows 的保留设备名，写它等于往设备里写。")
     return name
+
+
+# Windows 保留设备名。它们不带扩展名也算（`CON.md` 同样是设备）。
+_WIN_DEVICE_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
 RECEIPT_SCHEMA_VERSION = "0.1"
 
 
@@ -346,7 +366,7 @@ def _write_receipt(out_dir, payload: dict, digest: str, insight_ids: list[str],
         tmp.unlink(missing_ok=True)
 
 
-def _authorize(target, out_dir, payload: dict) -> None:
+def _authorize(target, out_dir, payload: dict, archive_name: str) -> None:
     """三条全满足才允许替换：回执在且 run_id 一致 / 现存文件哈希等于回执所记 /
     目标不是符号链接。
 
@@ -383,6 +403,15 @@ def _authorize(target, out_dir, payload: dict) -> None:
         raise ArchiveOverwriteError(
             f"{target} 已经存在，但 {out_dir / RECEIPT_NAME} 里没有本工具写过它的"
             f"记录——它可能是你自己的一篇笔记。拒绝覆盖。确认不要之后删掉它再重跑。")
+    expected_path = f"{ARCHIVE_DIR}/{archive_name}"
+    if receipt.get("archive_path") != expected_path:
+        # 回执描述的是**另一个**档案文件。换过 --agent-file 之后两份档案内容
+        # 常常一模一样，哈希也就一样——只比哈希的话，B 的回执会授权覆盖 A，
+        # 而「回执存在 ⇒ 它描述的就是盘上那份」这条不变量当场失效。
+        raise ArchiveOverwriteError(
+            f"{out_dir / RECEIPT_NAME} 记的是 {receipt.get('archive_path')!r}，"
+            f"不是 {expected_path!r}——这份回执不能为它授权。"
+            f"确认 {target} 不要了之后删掉它再重跑。")
     if receipt.get("run_id") != payload["run_id"]:
         raise ArchiveOverwriteError(
             f"{target} 是另一次运行（{receipt.get('run_id')}）写下的，"
@@ -433,6 +462,10 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
     from pathlib import Path
 
     out_dir = Path(out_dir)
+    # 名字先验：放在取锁之后校验的话，任何一个非法名字都会留下一把锁，
+    # 下次运行会被告知「另一个 compile 正在运行」——一个参数错误变成了
+    # 一个需要人去删文件才能解开的死结。
+    archive_name = check_archive_name(archive_name)
     check_archive_dir(out_dir)
     archive_dir = out_dir / ARCHIVE_DIR
 
@@ -446,14 +479,13 @@ def publish(out_dir, payload: dict, text: str, insight_ids: list[str],
             f"另一个 compile 正在这个目录里运行（锁文件 {lock}）。"
             f"确认没有之后，删掉这个锁文件再重跑。") from exc
 
-    archive_name = check_archive_name(archive_name)
     target = archive_dir / archive_name
     tmp = archive_dir / f".{archive_name}.tmp"
     try:
         # os.close 放进 try：它抛异常的概率极低，但放在外面就意味着
         # 「取到锁却没进 finally」这条路径存在，残锁要人工去删。
         os.close(fd)
-        _authorize(target, out_dir, payload)
+        _authorize(target, out_dir, payload, archive_name)
         data = _encode(text, "档案正文")
         try:
             # 写 tmp 放进这个 try：写到一半失败（磁盘满、被打断）同样会

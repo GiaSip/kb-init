@@ -801,3 +801,53 @@ def test_validate_still_takes_exactly_one_argument(tmp_path):
     _write_bundle(tmp_path)
     assert main(["validate", str(tmp_path / "insights.md")]) == 0
     assert main(["validate", str(tmp_path / "insights.md"), "--agent-file", "x"]) == 2
+
+
+@pytest.mark.parametrize("bad", ["AGENTS.md.", "AGENTS.md ", "x.md:stream",
+                                 "CON.md", "nul", "LPT1.md"])
+def test_agent_file_rejects_windows_aliases(tmp_path, bad):
+    """这三类在 Windows 上会别名到另一个目录项：写进去的和回执里记的不是
+    同一个东西，而这个工具声称支持 Windows。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", bad]) == 2
+
+
+def test_illegal_agent_file_does_not_leave_a_lock(tmp_path):
+    """一个参数错误不该变成需要人去删文件才能解开的死结。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "../x.md"]) == 2
+    assert not (tmp_path / ".kb-init-compile.lock").exists()
+    # 配对正例：改对之后照样能跑
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+
+
+def test_receipt_for_another_archive_does_not_authorize_this_one(tmp_path):
+    """换过 --agent-file 之后两份档案内容常常一模一样、哈希也一样——
+    只比哈希的话，B 的回执会授权覆盖 A。"""
+    from kb_init.cli import main
+
+    _write_bundle(tmp_path)
+    assert main(["compile", str(tmp_path / "insights.md")]) == 0
+    claude = tmp_path / "knowledge" / "CLAUDE.md"
+    before = claude.read_text(encoding="utf-8")
+    # 现在回执描述的是 AGENTS.md
+    assert main(["compile", str(tmp_path / "insights.md"),
+                 "--agent-file", "AGENTS.md"]) == 0
+    # 再回到 CLAUDE.md：回执说的不是它，必须拒绝
+    assert main(["compile", str(tmp_path / "insights.md")]) == 1
+    assert claude.read_text(encoding="utf-8") == before
+
+
+def test_missing_path_with_options_still_says_not_found(tmp_path, capsys):
+    """带 flag 时同样要报「找不到」而不是「用法错误」——
+    上一轮刚修好的诊断，不能只修没有 flag 的那一半。"""
+    from kb_init.cli import main
+
+    assert main(["compile", str(tmp_path / "没有.md"), "--agent-file", "A.md"]) == 7
+    assert "找不到" in capsys.readouterr().err
