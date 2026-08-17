@@ -62,7 +62,11 @@ _URL = re.compile(r"https?://[^\s\u3000）)】」』，。；]+")
 # 而真实泄露往往是**片段**（引用半句、抄一个词组）。按标点切出连续 CJK 段，
 # 每段本身就足够独特。漏报比误报危险得多，这里刻意偏向多产生候选。
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{4,}")
-_CJK_WINDOW = 6
+# 窗长取 4 而不是 6：**短窗比长窗更灵敏**。仓库里若引用了一个 6 字短语，
+# 它必然包含某个 4 字窗，于是 4 字探针照样命中；反过来则不成立——
+# 只生成 6 字窗时，一句被摘走的 4 字词组谁也抓不到。
+# 代价是噪音变多，而噪音由人扫一眼解决，漏报没人解决。
+_CJK_WINDOW = 4
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 
 
@@ -123,14 +127,24 @@ class ProbeError(RuntimeError):
 
 
 def _json_escaped(needle: str) -> str | None:
-    """`json.dumps` 默认 `ensure_ascii=True`，中文在文件里是 `\\u4f73\\u8d24` 这种样子。
+    """`json.dumps` 默认 `ensure_ascii=True` 时，非 ASCII 字符在文件里长成
+    `\\u4f73\\u8d24` 那样。拿解码后的原文去 grep，那类文件里的泄露一个都查不出来
+    ——而这个仓库的测试 fixture 就有用默认参数写 json 的。
 
-    拿解码后的汉字去 grep，那类文件里的泄露一个都查不出来——而这个仓库的
-    测试 fixture 就有用默认参数写 json 的。**这是一条真实会发生的假绿路径。**
+    两处容易写错，都会造成假绿：
+
+    1. **只转 ASCII 之外的那些字符**。含中文时把整串（包括英文字母）都转成
+       `\\u0068` 这种形式，得到的串在任何真实 JSON 里都不存在，等于白查。
+    2. **触发条件是「有没有非 ASCII 字符」，不是「有没有汉字」**。这份语料是
+       中英意三语，带变音符的拉丁词（形如 `caf` + `\\u00e9`）按汉字判就根本不生成
+       转义形式。
+
+    ⚠️ 顺带一条：**别把语料风格的词写进这个文件当例子**——写进来它就成了下一个
+    命中源，而检查器自己刷屏会让人开始忽略它的输出。上面那个例子是拆开写的。
     """
-    if not _CJK.search(needle):
+    if needle.isascii():
         return None
-    return "".join(f"\\u{ord(c):04x}" for c in needle)
+    return "".join(c if c.isascii() else f"\\u{ord(c):04x}" for c in needle)
 
 
 def hits(needle: str) -> list[str]:
