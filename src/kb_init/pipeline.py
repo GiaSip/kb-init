@@ -293,7 +293,8 @@ def _subdivide_flagged_groups(
 
 
 def _run_index_stage(
-    staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str
+    staging: Path, docs: list, embedder, splitter, *, run_id: str, corpus_hash: str,
+    progress=None,
 ) -> tuple[str, str | None]:
     """在 staging 内构建索引，返回 (status, reason)。
 
@@ -347,7 +348,9 @@ def _run_index_stage(
             if embedder is None:
                 from kb_init.embed import DEFAULT_MODEL, FastEmbedEmbedder
 
-                embedder = FastEmbedEmbedder()
+                # progress 只传给**我们自己造的**适配器。注入进来的假实现
+                # 由调用方全权负责，替它决定要不要报进度是越界。
+                embedder = FastEmbedEmbedder(progress=progress)
                 model_name = DEFAULT_MODEL
             else:
                 model_name = getattr(embedder, "model_name", "injected")
@@ -357,6 +360,8 @@ def _run_index_stage(
                 embedder.embed([bodies[c.doc_id][c.start:c.end] for c in chunks])
             )
             doc_ids, matrix = pool_chunk_vectors(chunks, vectors)
+            if progress:
+                progress({"event": "clustering"})
             # 全部文档都切不出块时同样不必进聚类
             groups, assignments = (
                 cluster_documents(doc_ids, matrix) if doc_ids else ([], [])
@@ -447,6 +452,7 @@ def run(
     embedder=None,
     splitter=None,
     corpus_provenance: str = "unknown",
+    progress=None,
 ) -> dict:
     from kb_init.insights import CORPUS_PROVENANCE
 
@@ -541,7 +547,7 @@ def run(
         else:
             index_status, index_reason = _run_index_stage(
                 staging, docs, embedder, splitter,
-                run_id=run_id, corpus_hash=corpus_hash,
+                run_id=run_id, corpus_hash=corpus_hash, progress=progress,
             )
 
         # provisional manifest：让洞察阶段读索引时走**和下游一模一样**的那条路
