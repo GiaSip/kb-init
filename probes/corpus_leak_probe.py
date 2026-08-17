@@ -60,16 +60,25 @@ _URL = re.compile(r"https?://[^\s\u3000）)】」』，。；]+")
 _CJK_RUN = re.compile(r"[\u4e00-\u9fff]{5,}")
 
 
+_EDGE_PUNCT = ".,;:!?)]}\"'（）【】「」『』，。；：！？·、…-—"
+
+
+def _trim(word: str) -> str:
+    return word.strip(_EDGE_PUNCT)
+
+
 def _fragments(text: str) -> set[str]:
     out = {text} if len(text) >= MIN_LEN else set()
-    out.update(w for w in text.split() if len(w) >= MIN_LEN)
+    # 按空白切出来的词常带着附着标点（`Falcon,`）。拿它原样去查，
+    # 仓库里那个不带逗号的 `Falcon` 就永远查不到——**假绿**。
+    out.update(w for w in map(_trim, text.split()) if len(w) >= MIN_LEN)
     for url in _URL.findall(text):
         out.add(url)
         # 也单独放主机名：实际漏出去的那次，仓库里留的就是 URL 的一部分。
         # 主机名要按 / ? # 一起切，并剥掉尾随标点：`https://host?q=1` 只按 "/"
         # 切会得到 `host?q=1`，那个串在仓库里永远查不到——**漏报**。
         host = re.split(r"[/?#]", url.split("//", 1)[-1], maxsplit=1)[0]
-        host = host.strip(".,;:!)]}\"'")
+        host = _trim(host)
         if len(host) >= MIN_LEN:
             out.add(host)
     out.update(_CJK_RUN.findall(text))
@@ -135,6 +144,13 @@ def main(argv: list[str]) -> int:
 
     needles = probes(paths)
     print(f"从 {len(paths)} 份产物取到 {len(needles)} 个探针词")
+    if not needles:
+        # 一个探针都没取到时报「干净」，就是这个项目反复踩的那个形状：
+        # 空集合让结论恒为真。真相是**这次检查根本没发生**。
+        print("检查中止：一个探针词都没取到——给的文件可能不是 insights.json，"
+              "或者它没有 keywords / evidence_titles。这不叫干净，叫没查。",
+              file=sys.stderr)
+        return 2
     try:
         leaked = {n: h for n in sorted(needles) if (h := hits(n))}
     except ProbeError as exc:
