@@ -1,6 +1,7 @@
 # STATUS — kb-init
 
-> 最后更新：2026-08-18（**已上线 GitHub**：历史清理 → private 验 CI → 公开；仍未发 PyPI）
+> 最后更新：2026-08-18（**已上线 GitHub + v0.1.0 release**：历史清理 → private 验 CI → 公开 →
+> 英文 README 按 GEO 重排 + 社区入口补齐；仍未发 PyPI）
 
 ## 当前阶段
 
@@ -248,6 +249,34 @@ Windows 上一条带非 ASCII 的 stderr 会在 `subprocess.run` 内部抛
 三类都已配检测器（`tests/test_source_hygiene.py`，含负例与"扫到 0 个文件即失败"），
 本机复现路径写进了 `CLAUDE.md`。**收敛后 7/7 全绿**（Win/Linux/macOS × 3.12/3.13
 + 打包冒烟），3.12 / 3.13 本地各 588 passed。
+
+### 对外面：英文默认 + GEO 重排
+
+**裁决（贾老师）**：README 英文为主、中文保留副本；初始化做到"标准"层；**PyPI 仍不发**。
+
+英文 README 不是逐句翻译，按 GEO（生成引擎优化）重排过，依据是 KDD'24 那篇
+GEO 论文（arXiv:2311.09735）的量化结论，出处见 KB
+`Wiki/调研/开源项目评估/repo-eval-yao-geo-skills.md` 与
+`project Y/clothing/research/GEO与AI搜索策略.md`：
+
+| GEO 杠杆 | 改动 |
+|---|---|
+| 前 30% 出 44.2% 引用 | 开头从「支持的平台」表换成真实语料数字表——原来陌生人最先读到的是 macOS Intel ❌ |
+| 统计数据 +40%（最有效） | 1925→757、日期可解析率 5.2/6.3/43%、覆盖率 16/23% 全部前置 |
+| 权威引用 +30% | CommonMark spec、onnxruntime wheel 清单给了可核链接 |
+| 关键词堆砌 −10%（唯一负项） | 没堆，保持自然语句 |
+| Q&A 与生成式检索天然匹配 | 新增 FAQ 一节 |
+
+同轮补齐：CONTRIBUTING / SECURITY / CHANGELOG / 两个 issue 表单 /
+v0.1.0 tag + Release（挂了 wheel 与 sdist——没有 PyPI 时这是唯一能拿到构建产物的地方）。
+
+**⚠️ 检索面的最大缺口仍是 PyPI**：没有包页面，`uvx kb-init` 不成立，
+任何"pip install 什么工具能把 Notion 导出变成 agent 知识库"的检索都不会命中。
+README 再优化补不上一个不存在的页面。这条按裁决保持不做，但记在这里。
+
+两个 GitHub API（community profile / GraphQL `issueTemplates`）都报本仓库"没有
+issue 模板"——**是 API 不认 YAML 表单**，不是文件有问题：`astral-sh/uv` 在同两个
+API 上同样报 MISSING。查这类"缺失"前先拿一个已知正常的仓库对照。
 
 新增 `probes/corpus_leak_probe.py`：探针词从**仓库外**的真实产物读，脚本自身不含
 个人数据。它抓到了我肉眼漏掉的两处（2C spec 的示意图里直接写着真实关键词；
