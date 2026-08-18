@@ -54,7 +54,11 @@ GENERIC = {"design", "architecture", "layout", "settings", "template", "command"
            # preposizione / grammatica 是意大利语的语法术语，2B 的合成 fixture
            # 拿它们测意语停用词过滤，与用户的笔记只是撞词。
            "preposizione", "grammatica", "account", "author", "profile",
-           "claude code", "recovery", "toggle"}
+           "claude code", "recovery", "toggle",
+           # 英文 README 加进来之后补的：badge 来自 shields.io 徽章 URL
+           # （`/badge/`、`badge.svg`），prompt 来自「A prompt you can paste」。
+           # 两个都是词典词，符合上面那条只加词典词/产品名的限制。
+           "badge", "prompt"}
 
 
 _URL = re.compile(r"https?://[^\s\u3000）)】」』，。；]+")

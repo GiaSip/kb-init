@@ -1,215 +1,326 @@
 # kb-init
 
-把你攒了几年、自己都没再打开过的笔记导出，编译成一份干净的、你的 AI agent 能直接用的知识库。
+**English** | [简体中文](README.zh-CN.md)
 
-## 支持的平台
+Compile the note export you've been ignoring for years into a clean knowledge base your AI agent can actually read.
 
-| 平台 | 状态 |
-|---|---|
-| Windows x64 | ✅ 依赖齐全，CI 覆盖 |
-| Linux x64 | ✅ 依赖齐全，CI 覆盖。需要 glibc ≥ 2.28（Ubuntu 20.04+、Debian 10+、RHEL 8+） |
-| macOS Apple Silicon | ✅ 依赖齐全，CI 覆盖。需要 macOS ≥ 14 |
-| Windows arm64 / Linux aarch64 | ⚠️ 依赖有对应 wheel，但**我们没测过**——大概率能用，出问题请开 issue |
-| **macOS Intel** | ❌ **不支持** |
+Point it at a Notion or Apple Notes export. It gives you back standard Markdown, a report about your own notes, and a `CLAUDE.md` (or `AGENTS.md`, or whatever file your agent reads) describing what's in there.
 
-Python：**3.12 / 3.13**。上界是刻意的——更高的版本我们还没测过，测过再放开。
+[![CI](https://github.com/GiaSip/kb-init/actions/workflows/ci.yml/badge.svg)](https://github.com/GiaSip/kb-init/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.12 | 3.13](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue.svg)](pyproject.toml)
 
-macOS Intel 这一条不是我们偷懒：向量推理依赖 `onnxruntime`，而它已经不再发布
-macOS x86_64 的预编译包（逐版本查过，至少从 1.18 起就没有了）。在 Intel Mac 上装它
-会退化成从源码编译并失败——与其让你花二十分钟撞上一堵墙，不如现在说清楚。
+---
 
-## 安装与运行
+## What it actually does, in numbers
 
-需要先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)。装好 uv 后一条命令运行，**无需自己安装 Python**：
+Measured on two real exports, not synthetic fixtures:
+
+| Input | Read | Kept | Dropped as empty shells |
+|---|---|---|---|
+| Notion export | 1,925 files | **757 (39%)** | 1,168 (60.7%) |
+| Apple Notes export | 620 files | **287 (46%)** | 333 (53.7%) |
+
+Roughly 60% of a years-old Notion export is empty shells — titles with no body, orphaned database rows,
+duplicate pages. Dropping them is most of the value. **Nothing is actually deleted**: every dropped
+record stays in `manifest.json` with the reason it was dropped, which is exactly why the number
+`1,925 → 757` can be computed at all.
+
+Three more numbers worth knowing before you run it, because they set expectations that most tools in
+this space quietly get wrong:
+
+- **Dates barely exist in exports.** Parseable creation dates: 5.2% (Notion export), 6.3% (Apple Notes
+  export), 43% (a maintained Obsidian vault). The export packages simply don't carry creation time.
+  When date coverage falls under 30%, timeline insights are switched off entirely rather than computed
+  from a 5% sample.
+- **About 70% of documents don't join any topic.** They land in `residual`. Saying "these did not form
+  a topic" beats smearing them into the nearest cluster.
+- **The archive therefore explains a small slice of your knowledge base** — 16% and 23% on the two real
+  corpora. That's stated inside the archive itself, in a section called "what this archive covers",
+  because an agent that doesn't read that line will treat the slice as the whole.
+
+## Quick start
+
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/). No Python installation needed:
 
 ```bash
 uvx --from git+https://github.com/GiaSip/kb-init kb-init ~/Downloads/notion-export -o my-kb
 ```
 
-> 还没发到 PyPI，所以要写 `--from git+…`。等发了包，这里会变成 `uvx kb-init`
-> ——在那之前写成短的那一版，是让你复制一条跑不起来的命令。
+> Not on PyPI yet, which is why the command has `--from git+…` in it. When the package ships, this
+> becomes `uvx kb-init` — writing the short form today would just hand you a command that fails.
 
-> 首次运行会下载 Python、依赖与一个约 90MB 的向量模型，按分钟计。这不是「零安装」，
-> 是「零项目安装」。索引阶段会一直告诉你它在干什么（进度走 stderr，
-> 所以 `kb-init … | 管道` 不受影响）；不会给你一个假的剩余时间——我们估不准。
+> First run downloads Python, dependencies and a ~90MB embedding model. Minutes, not seconds. This is
+> "zero project setup", not "zero install". The indexing stage reports what it is doing the whole time
+> (progress goes to stderr, so `kb-init … | pipe` is unaffected). It will **not** show you a fake ETA —
+> we can't estimate it honestly.
 
-## 它做了什么
+## The one step you cannot delegate
 
-在真实语料上的实测：
+Installing and running can go to an agent. The middle step cannot.
 
-| 输入 | 读入 | 保留 | 空壳丢弃 |
-|---|---|---|---|
-| Notion 导出 | 1925 篇 | **757 篇（39%）** | 1168 篇（60.7%） |
-| Apple Notes 导出 | 620 篇 | **287 篇（46%）** | 333 篇（53.7%） |
+When `insights.md` is written, **every entry is pre-checked**. Running `compile` straight away means
+accepting all of them. And cluster naming does fail: when a single language dominates a cluster, the
+keywords that come out can be nothing but that language's common words. Measured: one corpus produced
+9 recognisable groups out of 10, the other only 3 out of 5.
 
-被丢弃的记录**不会消失**——它们连同丢弃原因一起留在 `manifest.json` 里。
+**Only the person who wrote the notes can tell which group is recognisable.** That's the whole reason
+the confirmation step exists.
 
-## 输出
+| Who | Does what |
+|---|---|
+| agent | installs uv, runs `kb-init`, hands you `report.private.html` |
+| **you** | **open the report, uncheck the groups you don't recognise** (a dozen or so entries, a few minutes) |
+| agent | runs `kb-init compile`, puts the archive where it belongs |
+
+A prompt you can paste to your agent verbatim:
+
+```
+Run kb-init for me (a CLI that compiles note exports into a knowledge base an AI can use):
+1. Make sure uv is installed, then:
+   uvx --from git+https://github.com/GiaSip/kb-init kb-init <my export folder> -o my-kb
+2. When it finishes, open my-kb/report.private.html for me, then STOP and wait.
+3. I'll tell you when I've finished ticking my-kb/insights.md. Then run:
+   uvx --from git+https://github.com/GiaSip/kb-init kb-init compile my-kb/insights.md --agent-file AGENTS.md
+   (pick the filename your agent reads: CLAUDE.md for Claude Code, AGENTS.md for Codex)
+You MUST stop after step 2 — that review is mine to do, and the tool's reliability rests on it.
+Notes: the first run downloads a ~90MB model and takes minutes; don't mistake it for a hang.
+It will not install on Intel Macs (a dependency ships no wheel for that platform) — if you hit a
+build failure there, do not try to fix it.
+```
+
+## What you get
 
 ```
 my-kb/
-├── knowledge/          干净的标准 Markdown（默认相对路径链接，不绑定 Obsidian）
-│   └── CLAUDE.md       给 agent 读的档案（compile 之后才有；名字可用 --agent-file 换）
-├── report.private.html 给你自己看的报告：双击打开，看完回到 insights.md 勾选
-├── report.share.html   可以发出去的那一版（compile 之后才有，见下）
-├── index.json          主题索引：分块、聚类归属、代表文档、时间轴条件门
-├── index-vectors.npy   文档向量矩阵（可重建的下游产物，删掉不影响可读性）
-├── insights.json       洞察真源，**不要手改**
-├── insights.md         勾选清单：只改 `[x]` / `[ ]`，正文改了不生效
-├── compile.json        compile 的回执：这份档案是哪次运行写的、内容哈希是什么
-└── manifest.json       每篇文档的完整状态、身份、日期来源与去向
+├── knowledge/          clean standard Markdown (relative-path links by default, not Obsidian-bound)
+│   └── CLAUDE.md       the archive your agent reads (after compile; rename with --agent-file)
+├── report.private.html for you: double-click to open, then go tick insights.md
+├── report.share.html   the version you can send to someone (after compile, see below)
+├── index.json          topic index: chunks, cluster assignment, representative docs, timeline gate
+├── index-vectors.npy   document vector matrix (derived; deleting it costs you nothing readable)
+├── insights.json       source of truth for insights — do not hand-edit
+├── insights.md         the checklist: change only [x] / [ ]; edits to the prose have no effect
+├── compile.json        compile receipt: which run wrote this archive, and its content hash
+└── manifest.json       per-document status, identity, date provenance and destination
 ```
 
-`--no-index` 时只产出 `knowledge/` 与 `manifest.json`。
+With `--no-index` you get only `knowledge/` and `manifest.json`.
 
-`manifest.json` 里除了每篇文档的记录，还有三份账：
+Besides the per-document records, `manifest.json` carries three ledgers:
 
-- `counts` — 读入 / 保留 / 各类丢弃的数量
-- `unresolved_links` — 指向不存在目标的内部链接（目标从未存在，或已被判为空壳/重复）。**这些链接会退化为纯文本，绝不会在产物里留下死链**
-- `skipped_inputs` — 因文件名在文件系统层等价（`A.md` vs `a.md`、NFC/NFD）而被跳过的输入。macOS 导出里并不罕见
+- `counts` — read / kept / dropped, by category
+- `unresolved_links` — internal links pointing at something that doesn't exist (never existed, or was
+  judged an empty shell or a duplicate). **These degrade to plain text; the output never contains a
+  dead link.**
+- `skipped_inputs` — inputs skipped because their filenames are equivalent at the filesystem level
+  (`A.md` vs `a.md`, NFC/NFD). Not rare in macOS exports.
 
-## 选项
+## Two reports
 
-| 选项 | 说明 |
-|---|---|
-| `-o, --out` | 输出目录（默认 `kb-out`）。目录已有内容时拒绝覆盖 |
-| `--no-index` | 跳过索引：不下载模型、不联网，几秒拿到清洗产物。索引首次运行需下载 ~90MB 模型，按分钟计 |
-| `--wikilinks` | 保留 `[[wikilink]]` 方言。**默认关闭**——默认输出标准相对路径链接，因为 `[[...]]` 不是标准 Markdown，在 VS Code / GitHub 里是死链。它只改**输出语法**，不跳过解析：目标一律先解析到冻结后的输出名（`[[Project A]]` → `[[Project-A\|Project A]]`，因为文件实际叫 `Project-A.md`），歧义目标照样降级；**原有的标准相对链接无论如何都会被重映射**，否则目录拍平后一样失效 |
+The main command produces `report.private.html` — **double-click it, no network needed**.
 
-## 退出码
+It isn't decoration. The insight checklist needs your line-by-line confirmation, and nobody
+proof-reads a config file. So the checklist is rendered as a report about you first. Read it, then go
+back to `insights.md` and uncheck. Every entry carries the same short ID as the checklist
+(`T1` / `R1` / `C1`).
 
-| 码 | 含义 |
-|---|---|
-| 0 | 成功 |
-| 1 | 输出目录已有内容，拒绝覆盖 |
-| 2 | 用法错误 |
-| 3 | 输入不安全、损坏或不存在 |
-| 4 | 读写失败 |
-| 5 | 清洗产物已发布，但索引未完成（换一个 `--out` 目录重跑即可补上） |
-| 6 | 清洗产物与索引都在，只有洞察层没生成 |
-| 7 | `validate` 判定 `insights.md` 不合法（改文件后重跑，**不必重跑索引**） |
-| 8 | `compile`：清单合法，但没有任何条目能进档案（回去勾几条） |
-| 9 | `compile`：`insights.json` 与本版 kb-init 对不上（用当前版本重跑一次） |
-| 10 | 清洗、索引、洞察都在，只有报告没生成（勾选清单照常可用） |
+`kb-init compile` then writes `report.share.html` — **the one you can send out**:
 
-出错时打印单行诊断，不向普通用户抛 Python traceback。
+- only entries you **left checked**;
+- only keywords and counts — **no note titles, no body fragments, no file paths, no run IDs**;
+- compile prints every keyword the shareable version contains to your terminal. **Keywords come
+  straight out of your notes**, and field-level filtering cannot fix that — read the printed list
+  before you send the file.
 
-5 / 6 / 7 刻意分开：三者的下一步动作完全不同——重跑索引（要网络与模型）、
-只重算洞察、改手里那份清单。合并成一个码会让脚本做多余的事。
+Both reports are single-file, no JavaScript, no external requests.
 
-8 与 9 同理：8 的修复动作在你手上（改勾选），9 的在工具手上（重跑）。
-把 9 报成 8，就会把人支去改一份根本没有问题的清单。
+## Generating the archive your agent reads
 
-## 洞察清单怎么用
-
-`insights.md` 是一份带可见短 ID 的勾选清单。**你只应该改 `[x]` / `[ ]`**：
+Once you've finished ticking:
 
 ```bash
-kb-init validate my-kb/insights.md    # 独立校验，通过返回 0
+kb-init compile my-kb/insights.md                            # → my-kb/knowledge/CLAUDE.md
+kb-init compile my-kb/insights.md --agent-file AGENTS.md     # Codex and others
+kb-init compile my-kb/insights.md --agent-file GEMINI.md     # Gemini
 ```
 
-正文改了不会生效——下游按 ID 从 `insights.json` 取正文，不信任手改过的文案。
-ID 缺失 / 重复 / 不认识 / 跟 `insights.json` 不是同一次运行，一律报错并给出行号，
-**绝不静默少编几条**。
+**Producing a file your agent doesn't read is the same as producing nothing**, so the name is yours to
+pick.
 
-## 两份报告
+It only takes insights you checked *and* that declared a destination — corpus-level statistics
+(retention rate, broken-link counts) are useless to an agent and never enter the archive.
 
-跑完主命令就会得到 `report.private.html`——**双击打开，不需要联网**。
-它不是装饰：洞察清单要你逐条确认，而人不会去逐条校对一份配置文件，
-所以那份清单先被渲染成一份关于你自己的报告。看完再回到 `insights.md` 取消勾选。
+**Every sentence in the archive is word-for-word the sentence you approved on the checklist.** It is
+not rephrased, because "what you reviewed is what went in" is the entire value of that review step.
 
-报告里的每一条都印着与清单相同的短 ID（`T1` / `R1` / `C1`），照着找就行。
+How many sections there are depends on how much material there is upstream; this version has two
+(focus areas / coverage). An unrecognised section is a hard error, never a silently missing section.
 
-`kb-init compile` 会再产一份 `report.share.html`——**可以发出去的那一版**：
+Re-running is safe. But compile **only overwrites an archive it wrote itself** (verified by receipt
+and content hash). Any other file with that name — including an archive you hand-edited — is refused.
 
-- 只包含你**勾选留下**的条目；
-- 只包含关键词与统计数字，**不含任何笔记标题、正文片段、文件路径、运行编号**；
-- compile 会把这一版包含的全部关键词打印在终端上。**关键词直接来自你的笔记正文**，
-  字段级的过滤挡不住这一层——发出去之前请自己看一遍那份清单。
+> ⚠️ If your knowledge base already contains a note called `CLAUDE.md`, compile refuses to write and
+> tells you. Delete or rename it and re-run.
 
-两份报告都是单文件、无 JavaScript、无外链。
+## Supported platforms
 
-## 生成给 agent 用的 `CLAUDE.md`
-
-勾完清单之后：
-
-```bash
-kb-init compile my-kb/insights.md     # → my-kb/knowledge/CLAUDE.md
-```
-
-用别的 agent？档案文件名可以换——**产出一个对方不读的文件等于没产出**：
-
-```bash
-kb-init compile my-kb/insights.md --agent-file AGENTS.md    # Codex 等
-kb-init compile my-kb/insights.md --agent-file GEMINI.md    # Gemini
-```
-
-它只收**你勾选过、且声明了去向**的洞察：语料层统计（留存率、断链数）对 agent 没用，
-不进档案。**档案里的每一句都逐字等于你在清单上审过的那一句**——不重新措辞，
-因为「你审过的正是最终进去的」是这道人工确认的全部价值。
-
-有多少节由上游有多少料决定，本版只有两节（关注领域 / 覆盖范围）。
-认不出的节会直接报错而不是悄悄少写一节。
-
-重跑是安全的：改完勾选再 compile 一次即可。但它**只会覆盖自己写过的那份档案**
-（凭回执与内容哈希认），遇到同名的别的文件——包括你手工改过的档案——一律拒绝覆盖。
-
-> ⚠️ 你的知识库里如果本来就有一篇笔记叫 `CLAUDE.md`，compile 会拒绝写入并告诉你。
-> 删掉或改名再重跑。
-
-## 让 agent 帮你跑（以及哪一步它不能替你）
-
-装和跑都可以交给 agent（Claude Code / Codex / 其他）。**只有中间那一步不行。**
-
-理由不是不信任 agent，而是这个工具的安全性整个压在那一步上：`insights.md` 产出时
-每条都是**预先勾上的**，直接 `compile` 等于把全部洞察原样收进档案。而关键词命名
-会翻车——单一语言独占一个簇时，出来的可能只是那门语言的常用词
-（实测：一份语料 10 组里 9 组可辨认，另一份 5 组里只有 3 组）。
-**只有看的人能判断这一组认不认得出。**
-
-所以分工是：
-
-| 谁 | 做什么 |
+| Platform | Status |
 |---|---|
-| agent | 装 uv、跑 `kb-init`、把 `report.private.html` 递给你 |
-| **你** | **打开报告，把认不出的那几组取消勾选**（十几条，几分钟） |
-| agent | 跑 `kb-init compile`，把档案放到该放的地方 |
+| Windows x64 | ✅ dependencies complete, covered by CI |
+| Linux x64 | ✅ dependencies complete, covered by CI. Needs glibc ≥ 2.28 (Ubuntu 20.04+, Debian 10+, RHEL 8+) |
+| macOS Apple Silicon | ✅ dependencies complete, covered by CI. Needs macOS ≥ 14 |
+| Windows arm64 / Linux aarch64 | ⚠️ wheels exist, but **we have not tested it** — probably fine; please open an issue if not |
+| **macOS Intel** | ❌ **not supported** |
 
-可以直接贴给 agent 的一段话：
+Python: **3.12 / 3.13**. The upper bound is deliberate — we haven't tested anything newer. It will be
+raised once it's been tested, not before.
 
+macOS Intel isn't laziness on our part. Vector inference depends on
+[`onnxruntime`](https://pypi.org/project/onnxruntime/#files), which no longer publishes macOS x86_64
+wheels (checked version by version; gone since at least 1.18). Installing on an Intel Mac degrades to
+a source build and fails. Better to say so now than to let you spend twenty minutes hitting a wall.
+
+## Options
+
+| Option | Meaning |
+|---|---|
+| `-o, --out` | Output directory (default `kb-out`). Refuses to overwrite a non-empty directory |
+| `--no-index` | Skip indexing: no model download, no network, cleaned output in seconds |
+| `--wikilinks` | Keep the `[[wikilink]]` dialect. **Off by default** — the default emits standard relative links, because `[[...]]` is not standard Markdown and renders as a dead link in VS Code and on GitHub. It changes only the **output syntax**, not resolution: targets still resolve to the frozen output name (`[[Project A]]` → `[[Project-A\|Project A]]`, because the file is actually `Project-A.md`), and ambiguous targets still degrade. **Existing standard relative links are remapped either way**, otherwise they break once the tree is flattened |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | output directory not empty, refused to overwrite |
+| 2 | usage error |
+| 3 | input unsafe, corrupt, or missing |
+| 4 | read/write failure |
+| 5 | cleaned output published, indexing did not finish (re-run with a different `--out` to add it) |
+| 6 | cleaned output and index present, insights layer missing |
+| 7 | `validate` judged `insights.md` invalid (fix the file and re-run; **no need to re-index**) |
+| 8 | `compile`: checklist valid, but no entry qualifies for the archive (go tick some) |
+| 9 | `compile`: `insights.json` doesn't match this version of kb-init (re-run with the current version) |
+| 10 | cleaning, index and insights all present, only the report is missing (the checklist still works) |
+
+Errors print a one-line diagnostic. End users never see a Python traceback.
+
+5 / 6 / 7 are deliberately distinct: the next action differs completely in each case — re-index (needs
+network and the model), recompute insights only, or fix the checklist in your hand. Merging them would
+make scripts do unnecessary work.
+
+8 and 9 likewise: the fix for 8 is in *your* hands (change the ticks), the fix for 9 is in the *tool's*
+(re-run). Reporting 9 as 8 would send you off to edit a file that has nothing wrong with it.
+
+## Using the insight checklist
+
+`insights.md` is a checklist with visible short IDs. **You should only change `[x]` / `[ ]`:**
+
+```bash
+kb-init validate my-kb/insights.md    # standalone validation, returns 0 on success
 ```
-帮我跑一下 kb-init（一个把笔记导出编译成 AI 可用知识库的 CLI）：
-1. 确认装了 uv；然后 uvx --from git+https://github.com/GiaSip/kb-init kb-init <我的导出目录> -o my-kb
-2. 跑完把 my-kb/report.private.html 打开给我看，然后停下来等我
-3. 我勾选完 my-kb/insights.md 会告诉你，那时再跑：
-   uvx --from git+https://github.com/GiaSip/kb-init kb-init compile my-kb/insights.md --agent-file AGENTS.md
-   （文件名按你自己读哪份改：Claude Code 用 CLAUDE.md，Codex 用 AGENTS.md）
-第 2 步之后**必须停下来**——那一步的勾选只有我能做，工具的可靠性压在它上面。
-注意：第一次运行要下载约 90MB 的模型，按分钟计，别当成卡死；
-macOS Intel 装不上（依赖没有那个平台的预编译包），遇到编译失败不要试图修。
-```
 
-## 设计取舍
+Editing the prose has no effect — downstream reads the text from `insights.json` by ID and does not
+trust hand-edited copy. A missing, duplicated, unknown, or cross-run ID is an error with a line number.
+It will **never silently compile a few entries fewer.**
 
-- **不依赖 Obsidian**。三个产物没有一个需要它；装了的话把输出目录当 vault 打开即可
-- **不碰你的账号**。输入是导出文件夹或 zip，不做 OAuth，全程本地
-- **清洗只标记不删除**。被丢弃的记录连同原因留在 manifest 里——「1925 → 757」这个数字算得出来，靠的就是没真删
-- **绝不用文件修改时间判断新鲜度**。实测：一个正常维护的知识库算出来的「超过 180 天没动」是 0%，因为同步、git、批量操作都会刷新 mtime。改用 frontmatter → 正文日期 → 文件名日期 → git 首次提交 的降级链，全部落空则标记 unknown，不猜
-- **整次运行原子**。产物先落同级 staging 目录，全部成功后以**一次目录 rename** 发布；中途失败不留半成品，可以直接重跑
-- **歧义不猜**。当一个链接别名同时匹配多篇文档时，宁可降级为纯文本并记账，也不指向其中一篇——死链能被发现，指错的「活链」不会
-- **链接基准只有一个**。标准相对链接一律按**当前文档所在目录**解析（CommonMark 语义），不按文件名跨目录兜底，也不"当前目录不中就换导出根再试"。`a/linker.md` 里的 `(note.md)` 只可能是 `a/note.md`；仓库里只有 `b/note.md` 时它降级为纯文本，而不是接到 `b/note.md` 上
+## FAQ
 
-## 已知限制
+**Does it need Obsidian?**
+No. None of the three outputs require it. If you do use Obsidian, open the output directory as a vault.
 
-- **时间轴类洞察在导出类语料上不可用**。实测日期可解析率：Notion 导出 5.2% / Apple Notes 导出 6.3% /已维护的 Obsidian 库 43%——根因是导出包里本来就没有创建时间，不是解析能力不足。日期覆盖率低于 30% 时索引会把 `time_axis.available` 置为 `false`，依赖时间轴的洞察自动不产出，而不是拿 5% 的样本硬算
-- **大部分笔记不会被归入任何主题**。真实语料上约 70% 的文档进 `residual`：宁可说「这些没有形成主题」，也不把它们摊进最近的簇稀释成看不出是什么的大杂烩。**档案因此只解释了知识库的一小部分**（实测 16% / 23%），所以「这份档案的覆盖范围」那一节默认就在里面——档案不说这句，agent 会把那一小部分当成全集
-- **档案里的句子是审阅用语**（「这 N 篇里最具区分度的词是 …」），读起来不像一份为 agent 写的档案。这是自愿付的代价：它必须逐字等于你在清单上审过的那一句，否则 compile 就会编译出你从没审过的文字
-- **报告里的句子和档案里的一模一样**。报告不会替你换一种更好听的说法——
-  否则你就是在用 A 句做决定，而档案里进的是 B 句。「好看」由排版承担
-- **簇的名字是关键词，不是主题名**。单一语言独占一个簇时，出来的可能只是那门语言的常用词。所以关键词永远与篇数、三条证据标题一起呈现——你一眼就能判断它对不对，不对就在清单上取消勾选
+**Does it touch my Notion / Apple Notes account?**
+No. Input is an exported folder or zip. No OAuth, no API tokens, entirely local.
 
-- 嵌套结构的链接（如 `[![img](x.png)](target.md)`）不会被重映射——匹配用的正则不允许链接标签里出现 `]`。真实 Notion 语料（1925 篇）上剩余 2/237 条死链全部属于这一类
-- `--wikilinks` 下，指向**从未存在过的目标**的 `[[...]]` 会原样保留（Obsidian 里这是合法的"未创建"链接，点击即新建），因此该模式的输出可能含指向不存在文件的 wikilink；它们全部记在 manifest 的 `unresolved_links` 里。默认模式没有这种情况——解析不到就降级为纯文本
-- 文件名按 **NFC + 大小写不敏感** 视作等价（macOS / Windows 的默认语义）。在大小写敏感的文件系统上，`Guide.md` 与 `guide.md` 会被判为碰撞，只保留先到的一篇，另一篇记入 manifest 的 `skipped_inputs`；链接解析用的是同一套等价规则，入口与出口保持一致
-- 标题 slug 化时的中文字符区间只覆盖 CJK 基本平面（U+4E00–U+9FFF），扩展平面的汉字会被当作不安全字符剔除
-- 附件与图片不会被复制到输出目录
+**Does anything get sent anywhere?**
+No. The only network access is downloading the embedding model on first run. Both HTML reports are
+single-file with no JavaScript and no external requests.
+
+**Can I run it without downloading the model?**
+Yes — `--no-index`. You get `knowledge/` and `manifest.json` in seconds, without insights or reports.
+
+**Why is 60% of my export thrown away?**
+It isn't thrown away, it's marked. Years-old exports are mostly empty shells: titles with no body,
+orphaned database rows, duplicates. Every one stays in `manifest.json` with its drop reason.
+
+**Why does the archive only cover 16–23% of my notes?**
+Because ~70% of documents don't form a topic, and saying so is more useful than diluting real clusters
+with unrelated documents. The archive states its own coverage so your agent doesn't mistake the slice
+for the whole.
+
+**Why doesn't it use file modification time to judge freshness?**
+Because that number is a lie. Measured on a normally maintained knowledge base, "untouched for 180+
+days" came out as 0% — sync, git and bulk operations all refresh mtime. The fallback chain is
+frontmatter → date in body → date in filename → first git commit, and `unknown` when all of those miss.
+
+**Can my agent do the whole thing end to end?**
+No, and that's the design. See [the one step you cannot delegate](#the-one-step-you-cannot-delegate).
+
+**Is it on PyPI?**
+Not yet. Install with `uvx --from git+https://github.com/GiaSip/kb-init`.
+
+**Which agents work with it?**
+Any agent that reads a Markdown context file. Use `--agent-file` to pick the name: `CLAUDE.md` for
+Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini.
+
+## Design decisions
+
+- **No Obsidian dependency.** None of the three outputs need it.
+- **Never touches your account.** Export folder or zip in, local processing, nothing out.
+- **Cleaning marks, it doesn't delete.** Dropped records stay in the manifest with their reason — that
+  is precisely why `1,925 → 757` is a number anyone can check.
+- **Never uses mtime for freshness.** See the FAQ. Falls back through frontmatter → body date →
+  filename date → first git commit, then marks `unknown`. It does not guess.
+- **The run is atomic.** Output lands in a sibling staging directory and is published with a **single
+  directory rename** once everything succeeded. A failure mid-run leaves no half-finished state; just
+  run it again.
+- **Ambiguity is never guessed.** When a link alias matches more than one document, it degrades to
+  plain text and gets recorded, rather than pointing at one of them. A dead link gets noticed; a live
+  link pointing at the wrong document does not.
+- **Exactly one link base.** Standard relative links resolve against the **directory of the current
+  document**, per [CommonMark](https://spec.commonmark.org/) — no cross-directory fallback by filename,
+  and no "try the export root if the current directory misses". `(note.md)` inside `a/linker.md` can
+  only ever mean `a/note.md`; if the corpus only has `b/note.md`, it degrades to plain text.
+
+## Known limitations
+
+- **Timeline insights are unavailable on export-type corpora.** Parseable date rates: Notion export
+  5.2%, Apple Notes export 6.3%, maintained Obsidian vault 43%. The root cause is that exports don't
+  carry creation time — not a parsing weakness. Below 30% coverage the index sets
+  `time_axis.available` to `false` and timeline-dependent insights simply aren't produced.
+- **Most notes join no topic.** ~70% land in `residual` on real corpora, so **the archive explains only
+  a small part of your knowledge base** (16% / 23% measured).
+- **Archive sentences are review language** ("the most distinctive words among these N documents
+  are …"), which doesn't read like prose written for an agent. That's a price paid on purpose: the
+  sentence must be word-for-word what you approved, or compile would emit text you never reviewed.
+- **Report sentences are identical to archive sentences.** The report will not phrase it more nicely —
+  otherwise you'd be deciding based on sentence A while sentence B goes into the archive. "Looking
+  good" is the typography's job.
+- **Cluster names are keywords, not topic names.** When one language dominates a cluster, the result
+  can be that language's common words. Keywords are therefore always shown with the document count and
+  three evidence titles — enough for you to judge at a glance, and to untick when it's wrong.
+- Nested-structure links (e.g. `[![img](x.png)](target.md)`) are not remapped — the matching regex
+  disallows `]` inside a link label. On the real Notion corpus (1,925 files), the remaining 2 of 237
+  dead links are all of this kind.
+- Under `--wikilinks`, a `[[...]]` pointing at a target that **never existed** is preserved as-is (in
+  Obsidian that's a legal "not yet created" link). Output in that mode may therefore contain wikilinks
+  to non-existent files; all of them are recorded in the manifest's `unresolved_links`. The default
+  mode has no such case — unresolvable means plain text.
+- Filenames are treated as equivalent under **NFC + case-insensitive** rules (the macOS/Windows
+  default). On a case-sensitive filesystem, `Guide.md` and `guide.md` collide; the first wins and the
+  other is recorded in `skipped_inputs`. Link resolution uses the same equivalence rules, so entry and
+  exit stay consistent.
+- Title slugification covers only the CJK Basic Multilingual Plane (U+4E00–U+9FFF); extension-plane
+  Han characters are stripped as unsafe.
+- Attachments and images are not copied to the output directory.
+
+## Contributing
+
+Bug reports and platform reports are the most useful thing right now — especially on Windows arm64 and
+Linux aarch64, which have wheels but no test coverage. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+[Apache-2.0](LICENSE). See [NOTICE](NOTICE).
