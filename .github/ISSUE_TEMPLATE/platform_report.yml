@@ -1,0 +1,62 @@
+name: Platform report
+description: You ran it on a platform with no test coverage — it worked, or it didn't
+labels: [platform]
+title: "[platform] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Windows arm64** and **Linux aarch64** have wheels for every dependency but zero test
+        coverage — nobody has run kb-init on them. A report either way is genuinely useful, and
+        "it just worked" is a valid report. It's what lets the README stop saying ⚠️.
+
+        CI already covers Windows x64, Linux x64 and macOS Apple Silicon, so those only need an
+        issue when something is wrong (use the bug report template instead).
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows arm64
+        - Linux aarch64
+        - Linux x64 with glibc < 2.28
+        - macOS 13 or older
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: details
+    attributes:
+      label: OS version / distro / libc
+      placeholder: "Ubuntu 24.04, glibc 2.39"
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.13.2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options:
+        - Installed and ran fine
+        - Installed, but the run failed
+        - Failed to install
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Details
+      description: |
+        If it failed, the error output. If it worked, roughly how many documents you ran through it
+        and whether indexing completed — that's the part most likely to be platform-sensitive.

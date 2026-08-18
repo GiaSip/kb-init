@@ -29,12 +29,12 @@ classifiers = [
 ]
 dependencies = ["PyYAML>=6.0", "numpy>=1.24", "scikit-learn>=1.3", "fastembed>=0.3"]
 
-# 只写**已经存在**的链接。Documentation 指向 README 而不是一个还没建的文档站，
-# Changelog 不写——没有那个文件，一个 404 的链接是产物撒谎的最省事版本。
+# 只写**已经存在**的链接——一个 404 的链接是产物撒谎的最省事版本。
 [project.urls]
 Homepage = "https://github.com/GiaSip/kb-init"
 Repository = "https://github.com/GiaSip/kb-init"
 Issues = "https://github.com/GiaSip/kb-init/issues"
+Changelog = "https://github.com/GiaSip/kb-init/blob/main/CHANGELOG.md"
 
 [project.scripts]
 kb-init = "kb_init.cli:main_entry"

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security or privacy issue
+    url: https://github.com/GiaSip/kb-init/security/advisories/new
+    about: Report privately, not in a public issue. This includes real personal data found in the repo or its git history.

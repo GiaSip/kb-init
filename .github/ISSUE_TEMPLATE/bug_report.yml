@@ -1,0 +1,80 @@
+name: Bug report
+description: Something broke, or produced output that looks wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before anything else: **don't paste real note content**. Keywords, titles and paths from your
+        knowledge base are yours, not ours. Redact freely — a redacted report is still useful.
+
+  - type: input
+    id: version
+    attributes:
+      label: kb-init version
+      description: Output of `kb-init --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - Windows arm64
+        - Linux x64
+        - Linux aarch64
+        - macOS Apple Silicon
+        - macOS Intel (unsupported — see README)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.10"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: corpus
+    attributes:
+      label: What was the input?
+      options:
+        - Notion export
+        - Apple Notes export
+        - Obsidian vault
+        - Other / mixed
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened instead
+      description: |
+        Include the exit code if the command failed (`echo $?`). The codes are documented in the
+        README and each one means a different next action, so it narrows things down a lot.
+    validations:
+      required: true
+
+  - type: textarea
+    id: manifest
+    attributes:
+      label: Relevant ledger entries (optional)
+      description: |
+        For anything about dropped documents or broken links, the `counts`, `unresolved_links` or
+        `skipped_inputs` sections of `manifest.json` are usually the fastest evidence. Redact paths.
+      render: json
