@@ -52,3 +52,9 @@ dev = ["pytest>=8.0"]
 [tool.pytest.ini_options]
 markers = ["smoke: 需要真实模型缓存，不进常规 CI"]
 addopts = "-m 'not smoke'"
+# 仓库根要在 sys.path 上，`from tests.fakes import …` 才成立。
+#
+# 以前它"能跑"靠的是 `python -m pytest` 这个跑法——`-m` 会把当前目录塞进
+# sys.path，于是本地全绿。CI 用的是 `uv run pytest`（控制台入口，不加当前目录），
+# 六个格子全部 collection error。写在这里之后两种跑法一致，不再依赖谁记得用哪条命令。
+pythonpath = ["."]

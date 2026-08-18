@@ -289,12 +289,18 @@ RECEIPT_SCHEMA_VERSION = "0.1"
 
 
 def _encode(text: str, what: str) -> bytes:
-    """UTF-8 编码失败要归到退出码 9，不能漏成 traceback。
+    r"""UTF-8 编码失败要归到退出码 9，不能漏成 traceback。
 
     `"\ud800"` 这类孤立代理项是合法的 Python 字符串、过得了所有 isinstance 检查，
     却编码不了——而 `UnicodeEncodeError` 是 `ValueError` 的子类，不是 `OSError`，
-    CLI 那边的 `except OSError` 接不住它。json.loads 能从 `"\\ud800"` 转义里
+    CLI 那边的 `except OSError` 接不住它。json.loads 能从 `"\ud800"` 转义里
     造出这种字符串，所以它进得来。
+
+    ⚠️ 这个 docstring 必须是 **raw string**。不加 `r` 的话 `\ud800` 是转义序列，
+    于是这段文字里就真的躺着一个孤立代理项——而 Python 3.13 在编译期给 docstring
+    去缩进时会把它 encode 成 UTF-8，**整个模块 import 那一刻就炸**，一行测试都
+    跑不到。3.12 没有这条路径，所以本机永远是绿的，首次 CI 的 3.13 三格全红。
+    守这条的是 `tests/test_source_hygiene.py`。
     """
     try:
         return text.encode("utf-8")

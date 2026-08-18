@@ -46,9 +46,23 @@ Plan 2 拆成五块：**2A 索引**（已合并）→ **2B L2 洞察 + insights 
 ## 怎么跑
 
 ```bash
-.venv/bin/python -m pytest -q            # 全量（含真实语料验收，语料不在则自动跳过）
-.venv/bin/python -m pytest -q -m smoke   # 真实模型烟测，需已预热模型缓存
+.venv/bin/pytest -q                       # 全量（含真实语料验收，语料不在则自动跳过）
+.venv/bin/pytest -q -m smoke              # 真实模型烟测，需已预热模型缓存
 uv sync                                   # 改了依赖之后
+```
+
+**用控制台入口 `pytest`，不要用 `python -m pytest`**：`-m` 会顺手把当前目录塞进
+`sys.path`，CI 用的入口不会——首次 CI 六个格子全是 collection error，而本地
+一直全绿。（`pythonpath = ["."]` 已经把这条差异抹平，这里写的是别再把它蒙回去。）
+
+**本机 venv 是 3.12，CI 还跑 3.13**，而两者的差异不是理论上的：3.13 在编译期给
+docstring 去缩进，一个含孤立代理项的 docstring 会让整个模块 import 即炸，
+3.12 完全没有这条路径。碰 docstring / 编码 / 打包类改动时，在副本里过一遍 3.13
+（别在项目里直接 `uv run --python 3.13`，它会把 `.venv` 换掉）：
+
+```bash
+rsync -a --exclude .venv --exclude .git --exclude dist ./ /tmp/kb313/ \
+  && (cd /tmp/kb313 && uv run --python 3.13 pytest -q)
 ```
 
 改动流程走 superpowers：brainstorming → writing-plans → TDD 实现 → Codex 终审 → 合并。
