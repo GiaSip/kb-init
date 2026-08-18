@@ -1,6 +1,6 @@
 # STATUS — kb-init
 
-> 最后更新：2026-08-17（发布面备齐：LICENSE / 元数据 / CI 配置 / 首跑体验；未公开、未发包）
+> 最后更新：2026-08-18（**已上线 GitHub**：历史清理 → private 验 CI → 公开；仍未发 PyPI）
 
 ## 当前阶段
 
@@ -212,17 +212,42 @@ classifiers：Win x64/arm64 ✅ / Linux（glibc ≥ 2.28）✅ / macOS arm64（�
 | 项 | 状态 |
 |---|---|
 | 依赖侧跨平台 wheel | ✅ 已用 PyPI 清单逐个核实 |
-| **构建侧跨平台** | ❌ **未验证**——CI 配置写好了但从没跑过（仓库还没有远端） |
+| **构建侧跨平台** | ✅ **已验证**（2026-08-18 首次真跑，见下） |
 | 打包冒烟 | ✅ 已真跑：`uv build` → 全新 venv 装 wheel → `--version` / `--help` / 一次 `--no-index` 真跑 |
-| 公开仓库 / PyPI | ❌ 都没做，按裁决 |
+| 公开仓库 | ✅ https://github.com/GiaSip/kb-init（Apache-2.0） |
+| PyPI | ❌ 没发。README 的安装命令因此是 `uvx --from git+…` 的长形式 |
 
-### ⚠️ 公开前的硬门
+## 上线（2026-08-18）
 
-git 历史里还留着**真实语料内容**（一处社交账号 handle、一处意语学习笔记关键词，
-均来自 `f5e9d83`）。工作树已清干净，历史没有。
+### 公开前的硬门：已过
 
-已装 **pre-push 钩子**在推送那一刻拦下来（`.git/HISTORY-NOT-SCRUBBED` 里写着处置
-步骤）——写在这里的提醒靠人记得，而靠人记得等于没做完。
+git 历史里的**真实语料内容**（社交账号 handle ×2、意语学习笔记关键词、一条真实
+URL）已用 `git filter-repo --replace-text` 清掉，替换表放在仓库外。**144 个 commit
+全部保留**——这个项目的价值有一半在 commit message 里，squash 是不做的那个选项。
+署名同时统一为 `GiaSip`（144/144 的 author 本来就是它）。
+
+`corpus_leak_probe.py` 在重写前抓到 5 个真命中、重写后复跑干净。
+`.git/HISTORY-NOT-SCRUBBED` 已删，pre-push 钩子随之放行——**它按设计工作了一次**：
+门是在推送那一刻关的，不是靠谁记得。
+
+### CI 第一次真跑，抓到 3 类本机看不见的问题
+
+「CI 配置写好了但从没跑过」这一格的实际价值：**首推六格全红**，两轮才收敛。
+
+| # | 问题 | 为什么本机全绿 |
+|---|---|---|
+| 1 | `from tests.fakes import …` collection error | `python -m pytest` 会把当前目录塞进 `sys.path`，CI 用的控制台入口不会 |
+| 2 | `claude_md._encode` 的 docstring 含孤立代理项，**模块 import 即炸** | 只在 **3.13** 上炸（编译期给 docstring 去缩进那条路径会 encode），本机 venv 是 3.12 |
+| 3 | 文本读写不给 `encoding`，Windows（cp1252）上炸 | POSIX 默认就是 UTF-8 |
+
+第 3 类里还有一条**产品**问题，是运行时探针（`-W error::EncodingWarning`）捞的、
+静态检查当时看不见：`dates._from_git` 用 `subprocess(text=True)` 读 git 输出，
+Windows 上一条带非 ASCII 的 stderr 会在 `subprocess.run` 内部抛
+`UnicodeDecodeError`，而那里的 `except (OSError, SubprocessError)` 接不住它。
+
+三类都已配检测器（`tests/test_source_hygiene.py`，含负例与"扫到 0 个文件即失败"），
+本机复现路径写进了 `CLAUDE.md`。**收敛后 7/7 全绿**（Win/Linux/macOS × 3.12/3.13
++ 打包冒烟），3.12 / 3.13 本地各 588 passed。
 
 新增 `probes/corpus_leak_probe.py`：探针词从**仓库外**的真实产物读，脚本自身不含
 个人数据。它抓到了我肉眼漏掉的两处（2C spec 的示意图里直接写着真实关键词；
