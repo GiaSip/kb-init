@@ -23,8 +23,11 @@ macOS x86_64 的预编译包（逐版本查过，至少从 1.18 起就没有了�
 需要先安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)。装好 uv 后一条命令运行，**无需自己安装 Python**：
 
 ```bash
-uvx kb-init ~/Downloads/notion-export -o my-kb
+uvx --from git+https://github.com/GiaSip/kb-init kb-init ~/Downloads/notion-export -o my-kb
 ```
+
+> 还没发到 PyPI，所以要写 `--from git+…`。等发了包，这里会变成 `uvx kb-init`
+> ——在那之前写成短的那一版，是让你复制一条跑不起来的命令。
 
 > 首次运行会下载 Python、依赖与一个约 90MB 的向量模型，按分钟计。这不是「零安装」，
 > 是「零项目安装」。索引阶段会一直告诉你它在干什么（进度走 stderr，
@@ -176,10 +179,10 @@ kb-init compile my-kb/insights.md --agent-file GEMINI.md    # Gemini
 
 ```
 帮我跑一下 kb-init（一个把笔记导出编译成 AI 可用知识库的 CLI）：
-1. 确认装了 uv；然后 uvx --from <仓库地址> kb-init <我的导出目录> -o my-kb
+1. 确认装了 uv；然后 uvx --from git+https://github.com/GiaSip/kb-init kb-init <我的导出目录> -o my-kb
 2. 跑完把 my-kb/report.private.html 打开给我看，然后停下来等我
 3. 我勾选完 my-kb/insights.md 会告诉你，那时再跑：
-   uvx --from <仓库地址> kb-init compile my-kb/insights.md --agent-file AGENTS.md
+   uvx --from git+https://github.com/GiaSip/kb-init kb-init compile my-kb/insights.md --agent-file AGENTS.md
    （文件名按你自己读哪份改：Claude Code 用 CLAUDE.md，Codex 用 AGENTS.md）
 第 2 步之后**必须停下来**——那一步的勾选只有我能做，工具的可靠性压在它上面。
 注意：第一次运行要下载约 90MB 的模型，按分钟计，别当成卡死；
