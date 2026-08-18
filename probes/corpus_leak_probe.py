@@ -204,7 +204,10 @@ def _scan(needle: str) -> list[tuple[str, str]]:
         (["git", "log", "--all", "--oneline", "-i", "-F",
           f"--grep={needle}"], "历史(commit message)"),
     ):
-        result = subprocess.run(args, cwd=REPO, capture_output=True, text=True)
+        # `text=True` 不给 encoding 就按平台默认解码，而这个脚本的探针词本来就
+        # 大量是中文。Windows 上会解错——解错之后"没查到"看起来和"干净"一模一样。
+        result = subprocess.run(args, cwd=REPO, capture_output=True,
+                                text=True, encoding="utf-8")
         # git grep / git log 的 1 是「没找到」，其余非零是真错误。
         if result.returncode not in (0, 1):
             raise ProbeError(

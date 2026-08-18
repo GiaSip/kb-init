@@ -92,3 +92,102 @@ def test_the_check_leaves_ordinary_literals_alone():
 def test_every_source_file_parses(path: pathlib.Path):
     """上面那条的前提：文件读不进来 / 语法错时不能静默算作"没有命中"。"""
     ast.parse(path.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# 文本读写必须显式给 encoding
+#
+# 不给的话用的是**平台默认编码**：POSIX 上是 UTF-8，Windows 上是 cp1252。
+# 于是任何带非 ASCII 的读写在 Windows 上炸，而 macOS / Linux 上一路绿灯——
+# 首次 CI 就是这样：六个格子里只有 Windows 那两个红，症状是
+# `'charmap' codec can't decode byte 0x8f`。
+#
+# 产品代码当时是干净的，17 处全在测试里。但"测试里而已"不是理由：这些测试
+# 正是 Windows 支持的**唯一证据**，它们在 Windows 上跑不动，README 里那行
+# 「Windows x64 ✅」就没有东西撑着。
+#
+# **已知盲区，如实写明**：只查 `read_text` / `write_text` / 裸 `open()`。
+# `Path.open()` 与 `zipfile.ZipFile.open()` 长得一样却是两回事（后者根本没有
+# encoding 参数），要一起查就必须给 zipfile 开豁免——而豁免清单迟早会把真问题
+# 也豁免掉。宁可窄而准：目前仓库里所有 `.open(` 都是二进制模式。
+#
+# `subprocess` 一起查：`text=True` 而不给 encoding，走的是同一个平台默认。
+# 这一条抓到的是**产品**问题——`dates._from_git` 用 `text=True` 读 git 输出，
+# Windows 上一条带非 ASCII 的 stderr 会在 `subprocess.run` 内部抛
+# UnicodeDecodeError，而它既不是 OSError 也不是 SubprocessError，
+# 那里的 `except` 接不住，整次运行随之崩掉。
+_TEXT_IO = {"read_text", "write_text"}
+_SUBPROCESS_FUNCS = {"run", "Popen", "call", "check_call", "check_output"}
+
+
+def _is_binary_mode(call: ast.Call) -> bool:
+    mode = None
+    if len(call.args) >= 2:
+        mode = call.args[1]
+    for kw in call.keywords:
+        if kw.arg == "mode":
+            mode = kw.value
+    return (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
+            and "b" in mode.value)
+
+
+def encodingless_io(source: str) -> list[int]:
+    """返回**行号**列表：这些文本读写没写 encoding。空列表 = 干净。"""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        if any(kw.arg == "encoding" for kw in node.keywords):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _TEXT_IO:
+            out.append(node.lineno)
+        elif (isinstance(func, ast.Name) and func.id == "open"
+                and not _is_binary_mode(node)):
+            out.append(node.lineno)
+        elif (isinstance(func, ast.Attribute)
+                and func.attr in _SUBPROCESS_FUNCS
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "subprocess"
+                and _wants_text(node)):
+            out.append(node.lineno)
+    return sorted(out)
+
+
+def _wants_text(call: ast.Call) -> bool:
+    """只有开了文本模式才需要 encoding——不开的话拿到的是 bytes，没有解码这一步。"""
+    return any(kw.arg in ("text", "universal_newlines")
+               and isinstance(kw.value, ast.Constant) and kw.value.value is True
+               for kw in call.keywords)
+
+
+def test_no_text_io_relies_on_the_platform_default_encoding():
+    files = _python_files(REPO)
+    assert len(files) >= 20, f"只扫到 {len(files)} 个 .py，检查没真发生"
+
+    offenders = {}
+    for path in files:
+        lines = encodingless_io(path.read_text(encoding="utf-8"))
+        if lines:
+            offenders[str(path.relative_to(REPO))] = lines
+    assert not offenders, (
+        f"这些文本读写没给 encoding，会在 Windows（cp1252）上炸而本机全绿："
+        f"{offenders}。补 `encoding=\"utf-8\"`。")
+
+
+def test_the_encoding_check_catches_a_real_offender():
+    """负例：恒返回"干净"的检查器也能让上面那条全绿。"""
+    assert encodingless_io('p.write_text("x")\n') == [1]
+    assert encodingless_io('open("f")\n') == [1]
+    assert encodingless_io('subprocess.run(a, text=True)\n') == [1]
+
+
+def test_the_encoding_check_leaves_binary_and_explicit_calls_alone():
+    """正当写法不能被判死，否则这条规则会逼着后来的人给它开豁免。"""
+    assert encodingless_io('open("f", "wb")\n') == []
+    assert encodingless_io('open("f", mode="rb")\n') == []
+    assert encodingless_io('p.write_text("x", encoding="utf-8")\n') == []
+    # 不开文本模式就没有解码这一步，拿到的是 bytes。
+    assert encodingless_io('subprocess.run(a, capture_output=True)\n') == []
+    assert encodingless_io(
+        'subprocess.run(a, text=True, encoding="utf-8")\n') == []

@@ -47,7 +47,7 @@ def test_title_collision_gets_unique_path(tmp_path):
 
 def test_refuses_to_overwrite_existing_output(tmp_path):
     (tmp_path / "knowledge").mkdir(parents=True)
-    (tmp_path / "knowledge" / "x.md").write_text("已有内容")
+    (tmp_path / "knowledge" / "x.md").write_text("已有内容", encoding="utf-8")
     with pytest.raises(FileExistsError):
         emit([_doc("a", "标题")], tmp_path)
 

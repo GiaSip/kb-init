@@ -65,6 +65,15 @@ rsync -a --exclude .venv --exclude .git --exclude dist ./ /tmp/kb313/ \
   && (cd /tmp/kb313 && uv run --python 3.13 pytest -q)
 ```
 
+**Windows 的默认编码不是 UTF-8**（cp1252），所以任何不显式给 `encoding` 的文本
+读写 / `subprocess(text=True)` 都是"本机全绿、Windows 独红"。静态那面由
+`tests/test_source_hygiene.py` 守；跑到的路径再用运行时探针过一遍
+（它抓到过 `dates._from_git` 这条**产品**问题，静态检查当时还没覆盖 subprocess）：
+
+```bash
+PYTHONWARNDEFAULTENCODING=1 .venv/bin/pytest -q -W error::EncodingWarning
+```
+
 改动流程走 superpowers：brainstorming → writing-plans → TDD 实现 → Codex 终审 → 合并。
 Codex 终审用 read-only + xhigh + **量化硬预算**（分钟数 + 点名禁止的探针行为 + 降级出口），
 没有硬预算它会把时间烧在无界探测上。

@@ -44,6 +44,15 @@ def _from_git(path: Path) -> str | None:
             ["git", "log", "--follow", "--diff-filter=A",
              "--format=%ad", "--date=short", "--", path.name],
             cwd=path.parent, capture_output=True, text=True, timeout=10,
+            # `text=True` 不给 encoding 就按**平台默认**解码：POSIX 上是 UTF-8，
+            # Windows 上是 ANSI 代码页。git 两边都输出 UTF-8，于是 Windows 上
+            # 一条带非 ASCII 的 stderr（本地化的报错、文件名）会在
+            # `subprocess.run` 内部抛 UnicodeDecodeError——而它既不是 OSError
+            # 也不是 SubprocessError，下面那个 except 接不住，整次运行随之崩掉。
+            # 这跟 `claude_md._encode` 的 docstring 里写的是同一个病。
+            # `errors="replace"` 保证解码这一步不可能成为失败源：这里只要
+            # `%ad` 那几行 ASCII 日期，任何解不出来的字节都与结论无关。
+            encoding="utf-8", errors="replace",
         )
     except (OSError, subprocess.SubprocessError):
         return None

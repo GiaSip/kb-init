@@ -71,8 +71,8 @@ def test_rerun_same_corpus_yields_same_corpus_hash(tmp_path):
     src = _corpus(tmp_path / "src")
     run(src, tmp_path / "out1", run_id="r1")
     run(src, tmp_path / "out2", run_id="r2")
-    h1 = json.loads((tmp_path / "out1" / "manifest.json").read_text())["corpus_hash"]
-    h2 = json.loads((tmp_path / "out2" / "manifest.json").read_text())["corpus_hash"]
+    h1 = json.loads((tmp_path / "out1" / "manifest.json").read_text(encoding="utf-8"))["corpus_hash"]
+    h2 = json.loads((tmp_path / "out2" / "manifest.json").read_text(encoding="utf-8"))["corpus_hash"]
     assert h1 == h2
 
 

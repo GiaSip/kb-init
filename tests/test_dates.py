@@ -20,7 +20,7 @@ def _doc(**kwargs) -> Document:
 
 def test_level1_frontmatter_created_wins(tmp_path):
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(frontmatter={"created": "2023-05-01", "date": "2024-01-01"},
                body="写于 2022-03-03")
     assert resolve_date(doc, f) == ("2023-05-01", "frontmatter")
@@ -28,21 +28,21 @@ def test_level1_frontmatter_created_wins(tmp_path):
 
 def test_level1_accepts_date_key_too(tmp_path):
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(frontmatter={"date": "2024-01-02"})
     assert resolve_date(doc, f) == ("2024-01-02", "frontmatter")
 
 
 def test_level2_body_date(tmp_path):
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(body="随手记于 2022/03/03 的想法")
     assert resolve_date(doc, f) == ("2022-03-03", "body")
 
 
 def test_level3_filename_date(tmp_path):
     f = tmp_path / "2021-07-09-会议.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(source_relpath="2021-07-09-会议.md", body="无日期")
     assert resolve_date(doc, f) == ("2021-07-09", "filename")
 
@@ -52,7 +52,7 @@ def test_level4_git_first_commit(tmp_path):
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     subprocess.run(["git", "add", "a.md"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "commit", "-q", "-m", "x", "--date", "2020-02-02T00:00:00"],
@@ -65,7 +65,7 @@ def test_level4_git_first_commit(tmp_path):
 
 def test_level5_unknown_when_nothing_available(tmp_path):
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(body="完全没有日期")
     assert resolve_date(doc, f) == (None, "unknown")
 
@@ -73,7 +73,7 @@ def test_level5_unknown_when_nothing_available(tmp_path):
 def test_invalid_date_feb30_returns_unknown(tmp_path):
     """2024-02-30 是历法上不存在的日期，必须返回 unknown 而非假 ISO 字符串。"""
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(body="写于 2024-02-30 的内容")
     assert resolve_date(doc, f) == (None, "unknown")
 
@@ -81,7 +81,7 @@ def test_invalid_date_feb30_returns_unknown(tmp_path):
 def test_invalid_date_apr31_returns_unknown(tmp_path):
     """2023-04-31 是历法上不存在的日期（小月），必须返回 unknown。"""
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     doc = _doc(body="写于 2023-04-31 的内容")
     assert resolve_date(doc, f) == (None, "unknown")
 
@@ -95,7 +95,7 @@ def test_never_reads_mtime(tmp_path, monkeypatch):
     import os
 
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
 
     class ExplodingStat:
         def __init__(self, wrapped):
@@ -148,7 +148,7 @@ def test_never_reads_mtime(tmp_path, monkeypatch):
 def test_out_of_range_year_is_rejected(tmp_path):
     """年份区间检查：曾在改用 datetime.date 校验时被误删（回归）。"""
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     assert resolve_date(_doc(body="第 1234-5-6 条规定"), f) == (None, "unknown")
     assert resolve_date(_doc(body="见 2101-01-01 的说明"), f) == (None, "unknown")
 
@@ -156,6 +156,6 @@ def test_out_of_range_year_is_rejected(tmp_path):
 def test_longer_digit_run_is_not_truncated_into_a_date(tmp_path):
     """数字边界：没有它会从 11234-5-6 里截出 1234-5-6。"""
     f = tmp_path / "a.md"
-    f.write_text("x")
+    f.write_text("x", encoding="utf-8")
     assert resolve_date(_doc(body="编号 11234-5-6 的工件"), f) == (None, "unknown")
     assert resolve_date(_doc(body="版本 2020-01-011 号"), f) == (None, "unknown")

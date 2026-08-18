@@ -50,7 +50,8 @@ def test_module_does_not_import_fastembed_at_top_level():
     """--no-index 路径与全部单测都不该因为 import 就拖进 ONNX 运行时。"""
     code = "import kb_init.embed, sys; print('fastembed' in sys.modules)"
     out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        [sys.executable, "-c", code], capture_output=True, text=True,
+        check=True, encoding="utf-8",
     )
     assert out.stdout.strip() == "False"
 

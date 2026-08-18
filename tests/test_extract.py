@@ -53,8 +53,8 @@ def test_normal_zip_extracts(tmp_path):
 def test_walk_source_skips_symlinks(tmp_path):
     src = tmp_path / "src"
     (src / "sub").mkdir(parents=True)
-    (src / "real.md").write_text("real")
-    (src / "sub" / "nested.md").write_text("nested")
+    (src / "real.md").write_text("real", encoding="utf-8")
+    (src / "sub" / "nested.md").write_text("nested", encoding="utf-8")
     (src / "link.md").symlink_to(src / "real.md")
     found = {p.name for p in walk_source(src)}
     assert found == {"real.md", "nested.md"}
@@ -113,7 +113,7 @@ def test_walk_source_dir_nonmd_count_enforces_limit(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     for i in range(15):
-        (src / f"file{i}.txt").write_text("x")  # 15 .txt，零 .md
+        (src / f"file{i}.txt").write_text("x", encoding="utf-8")  # 15 .txt，零 .md
     limits = ExtractLimits(max_files=10)
     with pytest.raises(UnsafeArchiveError, match="file count"):
         walk_source(src, limits)
