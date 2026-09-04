@@ -2,7 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-把你攒了几年、自己都没再打开过的笔记导出，编译成一份干净的、你的 AI agent 能直接用的知识库。
+几年前的笔记导出，大半是空壳——AI agent 没法直接用。kb-init 把它编译成一份干净的、你的 AI agent 能直接用的知识库。
+
+为什么不能把导出目录直接丢给 agent、一个「编译步骤」要做对哪几件事——完整分析（英文）在 [docs/why-note-exports-fail-as-agent-context.md](docs/why-note-exports-fail-as-agent-context.md)。
 
 ## 支持的平台
 
