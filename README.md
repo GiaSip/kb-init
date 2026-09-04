@@ -2,9 +2,11 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Compile the note export you've been ignoring for years into a clean knowledge base your AI agent can actually read.
+A years-old note export is mostly empty shells — an AI agent can't use it as-is. kb-init compiles it into a clean knowledge base your agent can actually read.
 
 Point it at a Notion or Apple Notes export. It gives you back standard Markdown, a report about your own notes, and a `CLAUDE.md` (or `AGENTS.md`, or whatever file your agent reads) describing what's in there.
+
+Why a raw export fails as agent context, and what a compile step must do about it, is written up in [docs/why-note-exports-fail-as-agent-context.md](docs/why-note-exports-fail-as-agent-context.md).
 
 [![CI](https://github.com/GiaSip/kb-init/actions/workflows/ci.yml/badge.svg)](https://github.com/GiaSip/kb-init/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
