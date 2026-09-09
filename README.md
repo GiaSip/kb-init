@@ -323,6 +323,12 @@ Claude Code, `AGENTS.md` for Codex, `GEMINI.md` for Gemini.
 Bug reports and platform reports are the most useful thing right now — especially on Windows arm64 and
 Linux aarch64, which have wheels but no test coverage. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Honest boundaries
+
+- It compiles; it does not understand. Dropping empty shells is structural, not semantic — a one-line note that matters to you looks identical to junk. That is why every drop is logged and the review step is yours.
+- Creation dates are mostly absent from exports (about 5–6% parseable). It does not invent them.
+- Tested on real Notion and Apple Notes exports only. Other sources are untested.
+
 ## License
 
 [Apache-2.0](LICENSE). See [NOTICE](NOTICE).
