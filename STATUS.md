@@ -303,3 +303,8 @@ git 的 `-i` 对 `-S` 不生效、`--untracked` 不加就看不见新建文件�
 - 取得一份**第三方语料**后重新评估回头条件③（当前 `not_evaluable`）。
   两份自有语料细分后的 residual 分别是 77.4% / 84.1%，若第三方语料也 >70% 即触发 halo。
 - 单语言簇的通用词命名（2B spec §4.4 已记为已知失效模式，兜底是证据行 + 人肉 gate + L3 重命名）。
+
+## 公开面
+- repo: GiaSip/kb-init | onboarding: 2026-09-13 | next: 2026-10-13
+- mcp: kb-init | onboarding: 未跑
+<!-- 2026-09-13 基线：geo-check L1 全绿；L2 锚点 docs/why-note-exports-fail 在；README 有实测数字表、无对比表；14 天 referrer 全部 github.com，AI 来源 0。MCP 化是唯一候选，待定。 -->
